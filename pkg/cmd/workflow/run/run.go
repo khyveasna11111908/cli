@@ -9,12 +9,16 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/api"
+	"github.com/cli/cli/git"
 	"github.com/cli/cli/internal/ghrepo"
+	"github.com/cli/cli/internal/run"
 	"github.com/cli/cli/pkg/cmd/workflow/shared"
 	"github.com/cli/cli/pkg/cmdutil"
 	"github.com/cli/cli/pkg/iostreams"
@@ -31,6 +35,7 @@ type RunOptions struct {
 
 	Selector string
 	Ref      string
+	Test     bool
 
 	InputArgs []string
 	JSON      string
@@ -78,6 +83,10 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 
 			# Run the workflow file 'triage.yml' with JSON via --json
 			$ gh workflow run triage.yml --json='{"name":"scully", "greeting":"hello"}'
+
+			# Run a workflow file with uncommitted changes in a temporary remote branch
+			$ vim triage.yml                     # change the workflow
+			$ gh workflow run --test triage.yml  # push a temporary branch and run the workflow
 		`),
 		Args: func(cmd *cobra.Command, args []string) error {
 			if cmd.ArgsLenAtDash() == 0 && len(args[1:]) > 0 {
@@ -117,6 +126,10 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 				}
 			}
 
+			if opts.Ref != "" && opts.Test {
+				return &cmdutil.FlagError{Err: errors.New("only one of --ref and --test can be passed at a time")}
+			}
+
 			if runF != nil {
 				return runF(opts)
 			}
@@ -125,6 +138,7 @@ func NewCmdRun(f *cmdutil.Factory, runF func(*RunOptions) error) *cobra.Command 
 	}
 	cmd.Flags().StringVarP(&opts.Ref, "ref", "r", "", "The branch or tag name which contains the version of the workflow file you'd like to run")
 	cmd.Flags().StringVar(&opts.JSON, "json", "", "Provide workflow inputs as JSON")
+	cmd.Flags().BoolVarP(&opts.Test, "test", "t", false, "Run a workflow file with local changes in a temporary remote branch")
 
 	return cmd
 }
@@ -165,19 +179,35 @@ func runRun(opts *RunOptions) error {
 	// other words, how to force non-interactive if you do not want to use
 	// non-default inputs?
 
-	// TODO  once end-to-end is working, circle back and see if running a local workflow remotely is feasible by doing git stuff automagically in a throwaway branch.
+	var yamlContent []byte
 	ref := opts.Ref
-
-	if ref == "" {
-		ref, err = api.RepoDefaultBranch(client, repo)
-		if err != nil {
-			return fmt.Errorf("unable to determine default branch for %s: %w", ghrepo.FullName(repo), err)
-		}
-	}
-
-	yamlContent, err := getWorkflowContent(client, repo, workflow, ref)
+	projectDir, err := git.ToplevelDir()
 	if err != nil {
-		return fmt.Errorf("unable to fetch workflow file content: %w", err)
+		// TODO error handle
+		return err
+	}
+	localWorkflowPath := path.Join(projectDir, workflow.Path)
+
+	if opts.Test {
+		// TODO handle as-of-yet unpushed workflow file
+
+		yamlContent, err = ioutil.ReadFile(localWorkflowPath)
+		if err != nil {
+			// TODO error handle
+			return err
+		}
+	} else {
+		if ref == "" {
+			ref, err = api.RepoDefaultBranch(client, repo)
+			if err != nil {
+				return fmt.Errorf("unable to determine default branch for %s: %w", ghrepo.FullName(repo), err)
+			}
+		}
+
+		yamlContent, err = getWorkflowContent(client, repo, workflow, ref)
+		if err != nil {
+			return fmt.Errorf("unable to fetch workflow file content: %w", err)
+		}
 	}
 
 	inputs, err := findInputs(yamlContent)
@@ -240,7 +270,37 @@ func runRun(opts *RunOptions) error {
 		}
 	}
 
-	path := fmt.Sprintf("repos/%s/actions/workflows/%d/dispatches",
+	if opts.Test {
+		// TODO error handle throughout here
+
+		// TODO should this have a random string in it? does it matter?
+		tempBranchName := fmt.Sprintf("gh-%s-wip", workflow.Base())
+		currentBranchName, err := git.CurrentBranch()
+		if err != nil {
+			return err
+		}
+
+		cmdQueue := [][]string{}
+		cmdQueue = append(cmdQueue, []string{"stash"})
+		cmdQueue = append(cmdQueue, []string{"checkout", "-B", tempBranchName})
+		cmdQueue = append(cmdQueue, []string{"stash", "apply"})
+		cmdQueue = append(cmdQueue, []string{"add", localWorkflowPath})
+		cmdQueue = append(cmdQueue, []string{"commit", "-m", fmt.Sprintf("WIP commit on %s", workflow.Base())})
+		// TODO how to determine correct remote? can we re-use the logic from pr create?
+		cmdQueue = append(cmdQueue, []string{"push", "-f", "origin", tempBranchName})
+		cmdQueue = append(cmdQueue, []string{"checkout", currentBranchName})
+		cmdQueue = append(cmdQueue, []string{"stash", "apply"})
+
+		err = executeGitCmds(cmdQueue)
+		if err != nil {
+			return err
+		}
+		ref = tempBranchName
+
+		// TODO decide what to do about deleting branch
+	}
+
+	apiPath := fmt.Sprintf("repos/%s/actions/workflows/%d/dispatches",
 		ghrepo.FullName(repo), workflow.ID)
 
 	requestByte, err := json.Marshal(struct {
@@ -256,7 +316,7 @@ func runRun(opts *RunOptions) error {
 
 	body := bytes.NewReader(requestByte)
 
-	err = client.REST(repo.RepoHost(), "POST", path, body, nil)
+	err = client.REST(repo.RepoHost(), "POST", apiPath, body, nil)
 	if err != nil {
 		return fmt.Errorf("could not create workflow dispatch event: %w", err)
 	}
@@ -366,4 +426,21 @@ func getWorkflowContent(client *api.Client, repo ghrepo.Interface, workflow *sha
 	}
 
 	return decoded, nil
+}
+
+func executeGitCmds(cmdQueue [][]string) error {
+	// TODO instead of just dumping git output directly to STDOUT we should have
+	// a human friendly summation of each git command we're running.
+	for _, args := range cmdQueue {
+		cmd, err := git.GitCommand(args...)
+		if err != nil {
+			return err
+		}
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := run.PrepareCmd(cmd).Run(); err != nil {
+			return fmt.Errorf("failed running %s: %w", strings.Join(args, " "), err)
+		}
+	}
+	return nil
 }
