@@ -2,7 +2,6 @@ package docs
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,9 +10,11 @@ import (
 )
 
 func TestGenMdDoc(t *testing.T) {
+	linkHandler := func(s string) string { return s }
+
 	// We generate on subcommand so we have both subcommands and parents.
 	buf := new(bytes.Buffer)
-	if err := GenMarkdown(echoCmd, buf); err != nil {
+	if err := genMarkdownCustom(echoCmd, buf, linkHandler); err != nil {
 		t.Fatal(err)
 	}
 	output := buf.String()
@@ -29,9 +30,11 @@ func TestGenMdDoc(t *testing.T) {
 }
 
 func TestGenMdDocWithNoLongOrSynopsis(t *testing.T) {
+	linkHandler := func(s string) string { return s }
+
 	// We generate on subcommand so we have both subcommands and parents.
 	buf := new(bytes.Buffer)
-	if err := GenMarkdown(dummyCmd, buf); err != nil {
+	if err := genMarkdownCustom(dummyCmd, buf, linkHandler); err != nil {
 		t.Fatal(err)
 	}
 	output := buf.String()
@@ -43,6 +46,8 @@ func TestGenMdDocWithNoLongOrSynopsis(t *testing.T) {
 }
 
 func TestGenMdNoHiddenParents(t *testing.T) {
+	linkHandler := func(s string) string { return s }
+
 	// We generate on subcommand so we have both subcommands and parents.
 	for _, name := range []string{"rootflag", "strtwo"} {
 		f := rootCmd.PersistentFlags().Lookup(name)
@@ -50,7 +55,7 @@ func TestGenMdNoHiddenParents(t *testing.T) {
 		defer func() { f.Hidden = false }()
 	}
 	buf := new(bytes.Buffer)
-	if err := GenMarkdown(echoCmd, buf); err != nil {
+	if err := genMarkdownCustom(echoCmd, buf, linkHandler); err != nil {
 		t.Fatal(err)
 	}
 	output := buf.String()
@@ -65,15 +70,44 @@ func TestGenMdNoHiddenParents(t *testing.T) {
 	checkStringOmits(t, output, "Options inherited from parent commands")
 }
 
+func TestGenMdAliases(t *testing.T) {
+	buf := new(bytes.Buffer)
+	if err := genMarkdownCustom(aliasCmd, buf, nil); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	checkStringContains(t, output, aliasCmd.Long)
+	checkStringContains(t, output, jsonCmd.Example)
+	checkStringContains(t, output, "ALIASES")
+	checkStringContains(t, output, "yoo")
+	checkStringContains(t, output, "foo")
+}
+
+func TestGenMdJSONFields(t *testing.T) {
+	buf := new(bytes.Buffer)
+	if err := genMarkdownCustom(jsonCmd, buf, nil); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+
+	checkStringContains(t, output, jsonCmd.Long)
+	checkStringContains(t, output, jsonCmd.Example)
+	checkStringContains(t, output, "JSON Fields")
+	checkStringContains(t, output, "`foo`")
+	checkStringContains(t, output, "`bar`")
+	checkStringContains(t, output, "`baz`")
+}
+
 func TestGenMdTree(t *testing.T) {
 	c := &cobra.Command{Use: "do [OPTIONS] arg1 arg2"}
-	tmpdir, err := ioutil.TempDir("", "test-gen-md-tree")
+	tmpdir, err := os.MkdirTemp("", "test-gen-md-tree")
 	if err != nil {
 		t.Fatalf("Failed to create tmpdir: %v", err)
 	}
 	defer os.RemoveAll(tmpdir)
 
-	if err := GenMarkdownTree(c, tmpdir); err != nil {
+	if err := GenMarkdownTreeCustom(c, tmpdir, func(s string) string { return s }, func(s string) string { return s }); err != nil {
 		t.Fatalf("GenMarkdownTree failed: %v", err)
 	}
 
@@ -83,17 +117,130 @@ func TestGenMdTree(t *testing.T) {
 }
 
 func BenchmarkGenMarkdownToFile(b *testing.B) {
-	file, err := ioutil.TempFile("", "")
+	file, err := os.CreateTemp(b.TempDir(), "")
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer os.Remove(file.Name())
 	defer file.Close()
+
+	linkHandler := func(s string) string { return s }
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := GenMarkdown(rootCmd, file); err != nil {
+		if err := genMarkdownCustom(rootCmd, file, linkHandler); err != nil {
 			b.Fatal(err)
 		}
 	}
+}
+
+func TestPrintFlagsHTMLShowsDefaultValues(t *testing.T) {
+
+	type TestOptions struct {
+		Limit     int
+		Template  string
+		Fork      bool
+		NoArchive bool
+		Topic     []string
+	}
+	opts := TestOptions{}
+
+	// Int flag should show it
+	c := &cobra.Command{}
+	c.Flags().IntVar(&opts.Limit, "limit", 30, "Some limit")
+	flags := c.NonInheritedFlags()
+	buf := new(bytes.Buffer)
+	flags.SetOutput(buf)
+
+	if err := printFlagsHTML(buf, flags); err != nil {
+		t.Fatalf("printFlagsHTML failed: %s", err.Error())
+	}
+	output := buf.String()
+
+	checkStringContains(t, output, "(default 30)")
+
+	// Bool flag should hide it if default is false
+	c = &cobra.Command{}
+	c.Flags().BoolVar(&opts.Fork, "fork", false, "Show only forks")
+
+	flags = c.NonInheritedFlags()
+	buf = new(bytes.Buffer)
+	flags.SetOutput(buf)
+
+	if err := printFlagsHTML(buf, flags); err != nil {
+		t.Fatalf("printFlagsHTML failed: %s", err.Error())
+	}
+	output = buf.String()
+
+	checkStringOmits(t, output, "(default ")
+
+	// Bool flag should show it if default is true
+	c = &cobra.Command{}
+	c.Flags().BoolVar(&opts.NoArchive, "no-archived", true, "Hide archived")
+	flags = c.NonInheritedFlags()
+	buf = new(bytes.Buffer)
+	flags.SetOutput(buf)
+
+	if err := printFlagsHTML(buf, flags); err != nil {
+		t.Fatalf("printFlagsHTML failed: %s", err.Error())
+	}
+	output = buf.String()
+
+	checkStringContains(t, output, "(default true)")
+
+	// String flag should show it if default is not an empty string
+	c = &cobra.Command{}
+	c.Flags().StringVar(&opts.Template, "template", "T1", "Some template")
+	flags = c.NonInheritedFlags()
+	buf = new(bytes.Buffer)
+	flags.SetOutput(buf)
+
+	if err := printFlagsHTML(buf, flags); err != nil {
+		t.Fatalf("printFlagsHTML failed: %s", err.Error())
+	}
+	output = buf.String()
+
+	checkStringContains(t, output, "(default &#34;T1&#34;)")
+
+	// String flag should hide it if default is an empty string
+	c = &cobra.Command{}
+	c.Flags().StringVar(&opts.Template, "template", "", "Some template")
+
+	flags = c.NonInheritedFlags()
+	buf = new(bytes.Buffer)
+	flags.SetOutput(buf)
+
+	if err := printFlagsHTML(buf, flags); err != nil {
+		t.Fatalf("printFlagsHTML failed: %s", err.Error())
+	}
+	output = buf.String()
+
+	checkStringOmits(t, output, "(default ")
+
+	// String slice flag should hide it if default is an empty slice
+	c = &cobra.Command{}
+	c.Flags().StringSliceVar(&opts.Topic, "topic", nil, "Some topics")
+	flags = c.NonInheritedFlags()
+	buf = new(bytes.Buffer)
+	flags.SetOutput(buf)
+
+	if err := printFlagsHTML(buf, flags); err != nil {
+		t.Fatalf("printFlagsHTML failed: %s", err.Error())
+	}
+	output = buf.String()
+
+	checkStringOmits(t, output, "(default ")
+
+	// String slice flag should show it if default is not an empty slice
+	c = &cobra.Command{}
+	c.Flags().StringSliceVar(&opts.Topic, "topic", []string{"apples", "oranges"}, "Some topics")
+	flags = c.NonInheritedFlags()
+	buf = new(bytes.Buffer)
+	flags.SetOutput(buf)
+
+	if err := printFlagsHTML(buf, flags); err != nil {
+		t.Fatalf("printFlagsHTML failed: %s", err.Error())
+	}
+	output = buf.String()
+
+	checkStringContains(t, output, "(default [apples,oranges])")
 }
