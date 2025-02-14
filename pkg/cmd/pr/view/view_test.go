@@ -2,25 +2,78 @@ package view
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
-	"strings"
+	"os"
+	"regexp"
 	"testing"
 
-	"github.com/cli/cli/context"
-	"github.com/cli/cli/git"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/internal/run"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/httpmock"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/test"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/browser"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/internal/run"
+	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/jsonfieldstest"
+	"github.com/cli/cli/v2/test"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestJSONFields(t *testing.T) {
+	jsonfieldstest.ExpectCommandToSupportJSONFields(t, NewCmdView, []string{
+		"additions",
+		"assignees",
+		"author",
+		"autoMergeRequest",
+		"baseRefName",
+		"baseRefOid",
+		"body",
+		"changedFiles",
+		"closed",
+		"closedAt",
+		"comments",
+		"commits",
+		"createdAt",
+		"deletions",
+		"files",
+		"fullDatabaseId",
+		"headRefName",
+		"headRefOid",
+		"headRepository",
+		"headRepositoryOwner",
+		"id",
+		"isCrossRepository",
+		"isDraft",
+		"labels",
+		"latestReviews",
+		"maintainerCanModify",
+		"mergeCommit",
+		"mergeStateStatus",
+		"mergeable",
+		"mergedAt",
+		"mergedBy",
+		"milestone",
+		"number",
+		"potentialMergeCommit",
+		"projectCards",
+		"projectItems",
+		"reactionGroups",
+		"reviewDecision",
+		"reviewRequests",
+		"reviews",
+		"state",
+		"statusCheckRollup",
+		"title",
+		"updatedAt",
+		"url",
+	})
+}
 
 func Test_NewCmdView(t *testing.T) {
 	tests := []struct {
@@ -75,13 +128,13 @@ func Test_NewCmdView(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			io, _, _, _ := iostreams.Test()
-			io.SetStdoutTTY(tt.isTTY)
-			io.SetStdinTTY(tt.isTTY)
-			io.SetStderrTTY(tt.isTTY)
+			ios, _, _, _ := iostreams.Test()
+			ios.SetStdoutTTY(tt.isTTY)
+			ios.SetStdinTTY(tt.isTTY)
+			ios.SetStderrTTY(tt.isTTY)
 
 			f := &cmdutil.Factory{
-				IOStreams: io,
+				IOStreams: ios,
 			}
 
 			var opts *ViewOptions
@@ -96,8 +149,8 @@ func Test_NewCmdView(t *testing.T) {
 			cmd.SetArgs(argv)
 
 			cmd.SetIn(&bytes.Buffer{})
-			cmd.SetOut(ioutil.Discard)
-			cmd.SetErr(ioutil.Discard)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
 
 			_, err = cmd.ExecuteC()
 			if tt.wantErr != "" {
@@ -113,33 +166,15 @@ func Test_NewCmdView(t *testing.T) {
 }
 
 func runCommand(rt http.RoundTripper, branch string, isTTY bool, cli string) (*test.CmdOut, error) {
-	io, _, stdout, stderr := iostreams.Test()
-	io.SetStdoutTTY(isTTY)
-	io.SetStdinTTY(isTTY)
-	io.SetStderrTTY(isTTY)
+	ios, _, stdout, stderr := iostreams.Test()
+	ios.SetStdoutTTY(isTTY)
+	ios.SetStdinTTY(isTTY)
+	ios.SetStderrTTY(isTTY)
 
+	browser := &browser.Stub{}
 	factory := &cmdutil.Factory{
-		IOStreams: io,
-		HttpClient: func() (*http.Client, error) {
-			return &http.Client{Transport: rt}, nil
-		},
-		Config: func() (config.Config, error) {
-			return config.NewBlankConfig(), nil
-		},
-		BaseRepo: func() (ghrepo.Interface, error) {
-			return ghrepo.New("OWNER", "REPO"), nil
-		},
-		Remotes: func() (context.Remotes, error) {
-			return context.Remotes{
-				{
-					Remote: &git.Remote{Name: "origin"},
-					Repo:   ghrepo.New("OWNER", "REPO"),
-				},
-			}, nil
-		},
-		Branch: func() (string, error) {
-			return branch, nil
-		},
+		IOStreams: ios,
+		Browser:   browser,
 	}
 
 	cmd := NewCmdView(factory, nil)
@@ -151,14 +186,59 @@ func runCommand(rt http.RoundTripper, branch string, isTTY bool, cli string) (*t
 	cmd.SetArgs(argv)
 
 	cmd.SetIn(&bytes.Buffer{})
-	cmd.SetOut(ioutil.Discard)
-	cmd.SetErr(ioutil.Discard)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 
 	_, err = cmd.ExecuteC()
 	return &test.CmdOut{
-		OutBuf: stdout,
-		ErrBuf: stderr,
+		OutBuf:     stdout,
+		ErrBuf:     stderr,
+		BrowsedURL: browser.BrowsedURL(),
 	}, err
+}
+
+// hack for compatibility with old JSON fixture files
+func prFromFixtures(fixtures map[string]string) (*api.PullRequest, error) {
+	var response struct {
+		Data struct {
+			Repository struct {
+				PullRequest *api.PullRequest
+			}
+		}
+	}
+
+	ff, err := os.Open(fixtures["PullRequestByNumber"])
+	if err != nil {
+		return nil, err
+	}
+	defer ff.Close()
+
+	dec := json.NewDecoder(ff)
+	err = dec.Decode(&response)
+	if err != nil {
+		return nil, err
+	}
+
+	for name := range fixtures {
+		switch name {
+		case "PullRequestByNumber":
+		case "ReviewsForPullRequest", "CommentsForPullRequest":
+			ff, err := os.Open(fixtures[name])
+			if err != nil {
+				return nil, err
+			}
+			defer ff.Close()
+			dec := json.NewDecoder(ff)
+			err = dec.Decode(&response)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("unrecognized fixture type: %q", name)
+		}
+	}
+
+	return response.Data.Repository.PullRequest, nil
 }
 
 func TestPRView_Preview_nontty(t *testing.T) {
@@ -172,8 +252,7 @@ func TestPRView_Preview_nontty(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreview.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreview.json",
 			},
 			expectedOutputs: []string{
 				`title:\tBlueberries are from a fork\n`,
@@ -195,14 +274,13 @@ func TestPRView_Preview_nontty(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewWithMetadataByNumber.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithMetadataByNumber.json",
 			},
 			expectedOutputs: []string{
 				`title:\tBlueberries are from a fork\n`,
 				`reviewers:\t1 \(Requested\)\n`,
 				`assignees:\tmarseilles, monaco\n`,
-				`labels:\tone, two, three, four, five\n`,
+				`labels:\tClosed: Duplicate, Closed: Won't Fix, help wanted, Status: In Progress, Type: Bug\n`,
 				`projects:\tProject 1 \(column A\), Project 2 \(column B\), Project 3 \(column C\), Project 4 \(Awaiting triage\)\n`,
 				`milestone:\tuluru\n`,
 				`\*\*blueberries taste good\*\*`,
@@ -225,78 +303,15 @@ func TestPRView_Preview_nontty(t *testing.T) {
 				`milestone:\t\n`,
 				`additions:\t100\n`,
 				`deletions:\t10\n`,
-				`reviewers:\tDEF \(Commented\), def \(Changes requested\), ghost \(Approved\), hubot \(Commented\), xyz \(Approved\), 123 \(Requested\), Team 1 \(Requested\), abc \(Requested\)\n`,
+				`reviewers:\tDEF \(Commented\), def \(Changes requested\), ghost \(Approved\), hubot \(Commented\), xyz \(Approved\), 123 \(Requested\), abc \(Requested\), my-org\/team-1 \(Requested\)\n`,
 				`\*\*blueberries taste good\*\*`,
-			},
-		},
-		"Open PR with metadata by branch": {
-			branch: "master",
-			args:   "blueberries",
-			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prViewPreviewWithMetadataByBranch.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
-			},
-			expectedOutputs: []string{
-				`title:\tBlueberries are a good fruit`,
-				`state:\tOPEN`,
-				`author:\tnobody`,
-				`assignees:\tmarseilles, monaco\n`,
-				`reviewers:\t\n`,
-				`labels:\tone, two, three, four, five\n`,
-				`projects:\tProject 1 \(column A\), Project 2 \(column B\), Project 3 \(column C\)\n`,
-				`milestone:\tuluru\n`,
-				`additions:\t100\n`,
-				`deletions:\t10\n`,
-				`blueberries taste good`,
-			},
-		},
-		"Open PR for the current branch": {
-			branch: "blueberries",
-			args:   "",
-			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prView.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
-			},
-			expectedOutputs: []string{
-				`title:\tBlueberries are a good fruit`,
-				`state:\tOPEN`,
-				`author:\tnobody`,
-				`assignees:\t\n`,
-				`reviewers:\t\n`,
-				`labels:\t\n`,
-				`projects:\t\n`,
-				`milestone:\t\n`,
-				`additions:\t100\n`,
-				`deletions:\t10\n`,
-				`\*\*blueberries taste good\*\*`,
-			},
-		},
-		"Open PR wth empty body for the current branch": {
-			branch: "blueberries",
-			args:   "",
-			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prView_EmptyBody.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
-			},
-			expectedOutputs: []string{
-				`title:\tBlueberries are a good fruit`,
-				`state:\tOPEN`,
-				`author:\tnobody`,
-				`assignees:\t\n`,
-				`reviewers:\t\n`,
-				`labels:\t\n`,
-				`projects:\t\n`,
-				`milestone:\t\n`,
-				`additions:\t100\n`,
-				`deletions:\t10\n`,
 			},
 		},
 		"Closed PR": {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewClosedState.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewClosedState.json",
 			},
 			expectedOutputs: []string{
 				`state:\tCLOSED\n`,
@@ -315,8 +330,7 @@ func TestPRView_Preview_nontty(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewMergedState.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewMergedState.json",
 			},
 			expectedOutputs: []string{
 				`state:\tMERGED\n`,
@@ -335,8 +349,7 @@ func TestPRView_Preview_nontty(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewDraftState.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewDraftState.json",
 			},
 			expectedOutputs: []string{
 				`title:\tBlueberries are from a fork\n`,
@@ -352,25 +365,33 @@ func TestPRView_Preview_nontty(t *testing.T) {
 				`\*\*blueberries taste good\*\*`,
 			},
 		},
-		"Draft PR by branch": {
+		"PR with auto-merge enabled": {
 			branch: "master",
-			args:   "blueberries",
+			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prViewPreviewDraftStatebyBranch.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithAutoMergeEnabled.json",
 			},
 			expectedOutputs: []string{
-				`title:\tBlueberries are a good fruit\n`,
-				`state:\tDRAFT\n`,
+				`title:\tBlueberries are from a fork\n`,
+				`state:\tOPEN\n`,
 				`author:\tnobody\n`,
-				`labels:`,
-				`assignees:`,
-				`reviewers:`,
-				`projects:`,
-				`milestone:`,
+				`labels:\t\n`,
+				`assignees:\t\n`,
+				`projects:\t\n`,
+				`milestone:\t\n`,
 				`additions:\t100\n`,
 				`deletions:\t10\n`,
-				`\*\*blueberries taste good\*\*`,
+				`auto-merge:\tenabled\thubot\tsquash\n`,
+			},
+		},
+		"PR with nil project": {
+			branch: "master",
+			args:   "12",
+			fixtures: map[string]string{
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithNilProject.json",
+			},
+			expectedOutputs: []string{
+				`projects:\t\n`,
 			},
 		},
 	}
@@ -379,10 +400,10 @@ func TestPRView_Preview_nontty(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			http := &httpmock.Registry{}
 			defer http.Verify(t)
-			for name, file := range tc.fixtures {
-				name := fmt.Sprintf(`query %s\b`, name)
-				http.Register(httpmock.GraphQL(name), httpmock.FileResponse(file))
-			}
+
+			pr, err := prFromFixtures(tc.fixtures)
+			require.NoError(t, err)
+			shared.RunCommandFinder("12", pr, ghrepo.New("OWNER", "REPO"))
 
 			output, err := runCommand(http, tc.branch, false, tc.args)
 			if err != nil {
@@ -408,12 +429,12 @@ func TestPRView_Preview(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreview.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreview.json",
 			},
 			expectedOutputs: []string{
-				`Blueberries are from a fork`,
-				`Open.*nobody wants to merge 12 commits into master from blueberries.+100.-10`,
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10`,
 				`blueberries taste good`,
 				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
 			},
@@ -422,15 +443,15 @@ func TestPRView_Preview(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewWithMetadataByNumber.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithMetadataByNumber.json",
 			},
 			expectedOutputs: []string{
-				`Blueberries are from a fork`,
-				`Open.*nobody wants to merge 12 commits into master from blueberries.+100.-10`,
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10`,
 				`Reviewers:.*1 \(.*Requested.*\)\n`,
 				`Assignees:.*marseilles, monaco\n`,
-				`Labels:.*one, two, three, four, five\n`,
+				`Labels:.*Closed: Duplicate, Closed: Won't Fix, help wanted, Status: In Progress, Type: Bug\n`,
 				`Projects:.*Project 1 \(column A\), Project 2 \(column B\), Project 3 \(column C\), Project 4 \(Awaiting triage\)\n`,
 				`Milestone:.*uluru\n`,
 				`blueberries taste good`,
@@ -445,67 +466,22 @@ func TestPRView_Preview(t *testing.T) {
 				"ReviewsForPullRequest": "./fixtures/prViewPreviewManyReviews.json",
 			},
 			expectedOutputs: []string{
-				`Blueberries are from a fork`,
-				`Reviewers:.*DEF \(.*Commented.*\), def \(.*Changes requested.*\), ghost \(.*Approved.*\), hubot \(Commented\), xyz \(.*Approved.*\), 123 \(.*Requested.*\), Team 1 \(.*Requested.*\), abc \(.*Requested.*\)\n`,
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Reviewers: DEF \(Commented\), def \(Changes requested\), ghost \(Approved\), hubot \(Commented\), xyz \(Approved\), 123 \(Requested\), abc \(Requested\), my-org\/team-1 \(Requested\)`,
 				`blueberries taste good`,
 				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
-			},
-		},
-		"Open PR with metadata by branch": {
-			branch: "master",
-			args:   "blueberries",
-			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prViewPreviewWithMetadataByBranch.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
-			},
-			expectedOutputs: []string{
-				`Blueberries are a good fruit`,
-				`Open.*nobody wants to merge 8 commits into master from blueberries.+100.-10`,
-				`Assignees:.*marseilles, monaco\n`,
-				`Labels:.*one, two, three, four, five\n`,
-				`Projects:.*Project 1 \(column A\), Project 2 \(column B\), Project 3 \(column C\)\n`,
-				`Milestone:.*uluru\n`,
-				`blueberries taste good`,
-				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/10`,
-			},
-		},
-		"Open PR for the current branch": {
-			branch: "blueberries",
-			args:   "",
-			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prView.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
-			},
-			expectedOutputs: []string{
-				`Blueberries are a good fruit`,
-				`Open.*nobody wants to merge 8 commits into master from blueberries.+100.-10`,
-				`blueberries taste good`,
-				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/10`,
-			},
-		},
-		"Open PR wth empty body for the current branch": {
-			branch: "blueberries",
-			args:   "",
-			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prView_EmptyBody.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
-			},
-			expectedOutputs: []string{
-				`Blueberries are a good fruit`,
-				`Open.*nobody wants to merge 8 commits into master from blueberries.+100.-10`,
-				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/10`,
 			},
 		},
 		"Closed PR": {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewClosedState.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewClosedState.json",
 			},
 			expectedOutputs: []string{
-				`Blueberries are from a fork`,
-				`Closed.*nobody wants to merge 12 commits into master from blueberries.+100.-10`,
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Closed.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10`,
 				`blueberries taste good`,
 				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
 			},
@@ -514,12 +490,12 @@ func TestPRView_Preview(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewMergedState.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewMergedState.json",
 			},
 			expectedOutputs: []string{
-				`Blueberries are from a fork`,
-				`Merged.*nobody wants to merge 12 commits into master from blueberries.+100.-10`,
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Merged.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10`,
 				`blueberries taste good`,
 				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
 			},
@@ -528,28 +504,98 @@ func TestPRView_Preview(t *testing.T) {
 			branch: "master",
 			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestByNumber":   "./fixtures/prViewPreviewDraftState.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewDraftState.json",
 			},
 			expectedOutputs: []string{
-				`Blueberries are from a fork`,
-				`Draft.*nobody wants to merge 12 commits into master from blueberries.+100.-10`,
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Draft.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10`,
 				`blueberries taste good`,
 				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
 			},
 		},
-		"Draft PR by branch": {
+		"Open PR with all checks passing": {
 			branch: "master",
-			args:   "blueberries",
+			args:   "12",
 			fixtures: map[string]string{
-				"PullRequestForBranch":  "./fixtures/prViewPreviewDraftStatebyBranch.json",
-				"ReviewsForPullRequest": "./fixtures/prViewPreviewNoReviews.json",
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithAllChecksPassing.json",
 			},
 			expectedOutputs: []string{
-				`Blueberries are a good fruit`,
-				`Draft.*nobody wants to merge 8 commits into master from blueberries.+100.-10`,
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10 • ✓ Checks passing`,
 				`blueberries taste good`,
-				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/10`,
+				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
+			},
+		},
+		"Open PR with all checks failing": {
+			branch: "master",
+			args:   "12",
+			fixtures: map[string]string{
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithAllChecksFailing.json",
+			},
+			expectedOutputs: []string{
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10 • × All checks failing`,
+				`blueberries taste good`,
+				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
+			},
+		},
+		"Open PR with some checks failing": {
+			branch: "master",
+			args:   "12",
+			fixtures: map[string]string{
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithSomeChecksFailing.json",
+			},
+			expectedOutputs: []string{
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10 • × 1/2 checks failing`,
+				`blueberries taste good`,
+				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
+			},
+		},
+		"Open PR with some checks pending": {
+			branch: "master",
+			args:   "12",
+			fixtures: map[string]string{
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithSomeChecksPending.json",
+			},
+			expectedOutputs: []string{
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10 • - Checks pending`,
+				`blueberries taste good`,
+				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
+			},
+		},
+		"Open PR with no checks": {
+			branch: "master",
+			args:   "12",
+			fixtures: map[string]string{
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithNoChecks.json",
+			},
+			expectedOutputs: []string{
+				`Blueberries are from a fork OWNER/REPO#12`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`.+100.-10 • No checks`,
+				`blueberries taste good`,
+				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
+			},
+		},
+		"PR with auto-merge enabled": {
+			branch: "master",
+			args:   "12",
+			fixtures: map[string]string{
+				"PullRequestByNumber": "./fixtures/prViewPreviewWithAutoMergeEnabled.json",
+			},
+			expectedOutputs: []string{
+				`Blueberries are from a fork OWNER/REPO#12\n`,
+				`Open.*nobody wants to merge 12 commits into master from blueberries . about X years ago`,
+				`Auto-merge:.*enabled.* by hubot, using squash and merge`,
+				`blueberries taste good`,
+				`View this pull request on GitHub: https://github.com/OWNER/REPO/pull/12`,
 			},
 		},
 	}
@@ -558,10 +604,10 @@ func TestPRView_Preview(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			http := &httpmock.Registry{}
 			defer http.Verify(t)
-			for name, file := range tc.fixtures {
-				name := fmt.Sprintf(`query %s\b`, name)
-				http.Register(httpmock.GraphQL(name), httpmock.FileResponse(file))
-			}
+
+			pr, err := prFromFixtures(tc.fixtures)
+			require.NoError(t, err)
+			shared.RunCommandFinder("12", pr, ghrepo.New("OWNER", "REPO"))
 
 			output, err := runCommand(http, tc.branch, true, tc.args)
 			if err != nil {
@@ -570,8 +616,12 @@ func TestPRView_Preview(t *testing.T) {
 
 			assert.Equal(t, "", output.Stderr())
 
+			out := output.String()
+			timeRE := regexp.MustCompile(`\d+ years`)
+			out = timeRE.ReplaceAllString(out, "X years")
+
 			//nolint:staticcheck // prefer exact matchers over ExpectLines
-			test.ExpectLines(t, output.String(), tc.expectedOutputs...)
+			test.ExpectLines(t, out, tc.expectedOutputs...)
 		})
 	}
 }
@@ -579,16 +629,11 @@ func TestPRView_Preview(t *testing.T) {
 func TestPRView_web_currentBranch(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
-	http.Register(httpmock.GraphQL(`query PullRequestForBranch\b`), httpmock.FileResponse("./fixtures/prView.json"))
 
-	cs, cmdTeardown := run.Stub()
+	shared.RunCommandFinder("", &api.PullRequest{URL: "https://github.com/OWNER/REPO/pull/10"}, ghrepo.New("OWNER", "REPO"))
+
+	_, cmdTeardown := run.Stub()
 	defer cmdTeardown(t)
-
-	cs.Register(`git config --get-regexp.+branch\\\.blueberries\\\.`, 0, "")
-	cs.Register(`https://github\.com`, 0, "", func(args []string) {
-		url := strings.ReplaceAll(args[len(args)-1], "^", "")
-		assert.Equal(t, "https://github.com/OWNER/REPO/pull/10", url)
-	})
 
 	output, err := runCommand(http, "blueberries", true, "-w")
 	if err != nil {
@@ -596,168 +641,23 @@ func TestPRView_web_currentBranch(t *testing.T) {
 	}
 
 	assert.Equal(t, "", output.String())
-	assert.Equal(t, "Opening github.com/OWNER/REPO/pull/10 in your browser.\n", output.Stderr())
+	assert.Equal(t, "Opening https://github.com/OWNER/REPO/pull/10 in your browser.\n", output.Stderr())
+	assert.Equal(t, "https://github.com/OWNER/REPO/pull/10", output.BrowsedURL)
 }
 
 func TestPRView_web_noResultsForBranch(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
-	http.Register(httpmock.GraphQL(`query PullRequestForBranch\b`), httpmock.FileResponse("./fixtures/prView_NoActiveBranch.json"))
 
-	cs, cmdTeardown := run.Stub()
+	shared.RunCommandFinder("", nil, nil)
+
+	_, cmdTeardown := run.Stub()
 	defer cmdTeardown(t)
-
-	cs.Register(`git config --get-regexp.+branch\\\.blueberries\\\.`, 0, "")
 
 	_, err := runCommand(http, "blueberries", true, "-w")
-	if err == nil || err.Error() != `no pull requests found for branch "blueberries"` {
+	if err == nil || err.Error() != `no pull requests found` {
 		t.Errorf("error running command `pr view`: %v", err)
 	}
-}
-
-func TestPRView_web_numberArg(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
-
-	http.Register(
-		httpmock.GraphQL(`query PullRequestByNumber\b`),
-		httpmock.StringResponse(`
-			{ "data": { "repository": { "pullRequest": {
-				"url": "https://github.com/OWNER/REPO/pull/23"
-			} } } }`),
-	)
-
-	cs, cmdTeardown := run.Stub()
-	defer cmdTeardown(t)
-
-	cs.Register(`https://github\.com`, 0, "", func(args []string) {
-		url := strings.ReplaceAll(args[len(args)-1], "^", "")
-		assert.Equal(t, "https://github.com/OWNER/REPO/pull/23", url)
-	})
-
-	output, err := runCommand(http, "master", true, "-w 23")
-	if err != nil {
-		t.Errorf("error running command `pr view`: %v", err)
-	}
-
-	assert.Equal(t, "", output.String())
-}
-
-func TestPRView_web_numberArgWithHash(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
-
-	http.Register(
-		httpmock.GraphQL(`query PullRequestByNumber\b`),
-		httpmock.StringResponse(`
-			{ "data": { "repository": { "pullRequest": {
-				"url": "https://github.com/OWNER/REPO/pull/23"
-			} } } }`),
-	)
-
-	cs, cmdTeardown := run.Stub()
-	defer cmdTeardown(t)
-
-	cs.Register(`https://github\.com`, 0, "", func(args []string) {
-		url := strings.ReplaceAll(args[len(args)-1], "^", "")
-		assert.Equal(t, "https://github.com/OWNER/REPO/pull/23", url)
-	})
-
-	output, err := runCommand(http, "master", true, `-w "#23"`)
-	if err != nil {
-		t.Errorf("error running command `pr view`: %v", err)
-	}
-
-	assert.Equal(t, "", output.String())
-}
-
-func TestPRView_web_urlArg(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
-
-	http.Register(
-		httpmock.GraphQL(`query PullRequestByNumber\b`),
-		httpmock.StringResponse(`
-			{ "data": { "repository": { "pullRequest": {
-				"url": "https://github.com/OWNER/REPO/pull/23"
-			} } } }`),
-	)
-
-	cs, cmdTeardown := run.Stub()
-	defer cmdTeardown(t)
-
-	cs.Register(`https://github\.com`, 0, "", func(args []string) {
-		url := strings.ReplaceAll(args[len(args)-1], "^", "")
-		assert.Equal(t, "https://github.com/OWNER/REPO/pull/23", url)
-	})
-
-	output, err := runCommand(http, "master", true, "-w https://github.com/OWNER/REPO/pull/23/files")
-	if err != nil {
-		t.Errorf("error running command `pr view`: %v", err)
-	}
-
-	assert.Equal(t, "", output.String())
-}
-
-func TestPRView_web_branchArg(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
-
-	http.Register(
-		httpmock.GraphQL(`query PullRequestForBranch\b`),
-		httpmock.StringResponse(`
-			{ "data": { "repository": { "pullRequests": { "nodes": [
-				{ "headRefName": "blueberries",
-				  "isCrossRepository": false,
-				  "url": "https://github.com/OWNER/REPO/pull/23" }
-			] } } } }`),
-	)
-
-	cs, cmdTeardown := run.Stub()
-	defer cmdTeardown(t)
-
-	cs.Register(`https://github\.com`, 0, "", func(args []string) {
-		url := strings.ReplaceAll(args[len(args)-1], "^", "")
-		assert.Equal(t, "https://github.com/OWNER/REPO/pull/23", url)
-	})
-
-	output, err := runCommand(http, "master", true, "-w blueberries")
-	if err != nil {
-		t.Errorf("error running command `pr view`: %v", err)
-	}
-
-	assert.Equal(t, "", output.String())
-}
-
-func TestPRView_web_branchWithOwnerArg(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
-
-	http.Register(
-		httpmock.GraphQL(`query PullRequestForBranch\b`),
-		httpmock.StringResponse(`
-			{ "data": { "repository": { "pullRequests": { "nodes": [
-				{ "headRefName": "blueberries",
-				  "isCrossRepository": true,
-				  "headRepositoryOwner": { "login": "hubot" },
-				  "url": "https://github.com/hubot/REPO/pull/23" }
-			] } } } }`),
-	)
-
-	cs, cmdTeardown := run.Stub()
-	defer cmdTeardown(t)
-
-	cs.Register(`https://github\.com`, 0, "", func(args []string) {
-		url := strings.ReplaceAll(args[len(args)-1], "^", "")
-		assert.Equal(t, "https://github.com/hubot/REPO/pull/23", url)
-	})
-
-	output, err := runCommand(http, "master", true, "-w hubot:blueberries")
-	if err != nil {
-		t.Errorf("error running command `pr view`: %v", err)
-	}
-
-	assert.Equal(t, "", output.String())
 }
 
 func TestPRView_tty_Comments(t *testing.T) {
@@ -776,7 +676,7 @@ func TestPRView_tty_Comments(t *testing.T) {
 				"ReviewsForPullRequest": "./fixtures/prViewPreviewReviews.json",
 			},
 			expectedOutputs: []string{
-				`some title`,
+				`some title OWNER/REPO#12`,
 				`1 \x{1f615} • 2 \x{1f440} • 3 \x{2764}\x{fe0f}`,
 				`some body`,
 				`———————— Not showing 9 comments ————————`,
@@ -796,7 +696,7 @@ func TestPRView_tty_Comments(t *testing.T) {
 				"CommentsForPullRequest": "./fixtures/prViewPreviewFullComments.json",
 			},
 			expectedOutputs: []string{
-				`some title`,
+				`some title OWNER/REPO#12`,
 				`some body`,
 				`monalisa • Jan  1, 2020 • Edited`,
 				`1 \x{1f615} • 2 \x{1f440} • 3 \x{2764}\x{fe0f} • 4 \x{1f389} • 5 \x{1f604} • 6 \x{1f680} • 7 \x{1f44e} • 8 \x{1f44d}`,
@@ -837,10 +737,15 @@ func TestPRView_tty_Comments(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			http := &httpmock.Registry{}
 			defer http.Verify(t)
-			for name, file := range tt.fixtures {
-				name := fmt.Sprintf(`query %s\b`, name)
-				http.Register(httpmock.GraphQL(name), httpmock.FileResponse(file))
+
+			if len(tt.fixtures) > 0 {
+				pr, err := prFromFixtures(tt.fixtures)
+				require.NoError(t, err)
+				shared.RunCommandFinder("123", pr, ghrepo.New("OWNER", "REPO"))
+			} else {
+				shared.RunCommandFinder("123", nil, nil)
 			}
+
 			output, err := runCommand(http, tt.branch, true, tt.cli)
 			if tt.wantsErr {
 				assert.Error(t, err)
@@ -943,10 +848,15 @@ func TestPRView_nontty_Comments(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			http := &httpmock.Registry{}
 			defer http.Verify(t)
-			for name, file := range tt.fixtures {
-				name := fmt.Sprintf(`query %s\b`, name)
-				http.Register(httpmock.GraphQL(name), httpmock.FileResponse(file))
+
+			if len(tt.fixtures) > 0 {
+				pr, err := prFromFixtures(tt.fixtures)
+				require.NoError(t, err)
+				shared.RunCommandFinder("123", pr, ghrepo.New("OWNER", "REPO"))
+			} else {
+				shared.RunCommandFinder("123", nil, nil)
 			}
+
 			output, err := runCommand(http, tt.branch, false, tt.cli)
 			if tt.wantsErr {
 				assert.Error(t, err)
