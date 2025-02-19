@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmd/workflow/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmd/workflow/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/spf13/cobra"
 )
 
@@ -17,22 +17,28 @@ type EnableOptions struct {
 	HttpClient func() (*http.Client, error)
 	IO         *iostreams.IOStreams
 	BaseRepo   func() (ghrepo.Interface, error)
+	Prompter   iprompter
 
 	Selector string
 	Prompt   bool
+}
+
+type iprompter interface {
+	Select(string, string, []string) (int, error)
 }
 
 func NewCmdEnable(f *cmdutil.Factory, runF func(*EnableOptions) error) *cobra.Command {
 	opts := &EnableOptions{
 		IO:         f.IOStreams,
 		HttpClient: f.HttpClient,
+		Prompter:   f.Prompter,
 	}
 
 	cmd := &cobra.Command{
-		Use:    "enable [<workflow ID> | <workflow name>]",
-		Short:  "Enable a workflow",
-		Args:   cobra.MaximumNArgs(1),
-		Hidden: true,
+		Use:   "enable [<workflow-id> | <workflow-name>]",
+		Short: "Enable a workflow",
+		Long:  "Enable a workflow, allowing it to be run and show up when listing workflows.",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// support `-R, --repo` override
 			opts.BaseRepo = f.BaseRepo
@@ -40,7 +46,7 @@ func NewCmdEnable(f *cmdutil.Factory, runF func(*EnableOptions) error) *cobra.Co
 			if len(args) > 0 {
 				opts.Selector = args[0]
 			} else if !opts.IO.CanPrompt() {
-				return &cmdutil.FlagError{Err: errors.New("workflow ID or name required when not running interactively")}
+				return cmdutil.FlagErrorf("workflow ID or name required when not running interactively")
 			} else {
 				opts.Prompt = true
 			}
@@ -64,11 +70,11 @@ func runEnable(opts *EnableOptions) error {
 
 	repo, err := opts.BaseRepo()
 	if err != nil {
-		return fmt.Errorf("could not determine base repo: %w", err)
+		return err
 	}
 
-	states := []shared.WorkflowState{shared.DisabledManually}
-	workflow, err := shared.ResolveWorkflow(
+	states := []shared.WorkflowState{shared.DisabledManually, shared.DisabledInactivity}
+	workflow, err := shared.ResolveWorkflow(opts.Prompter,
 		opts.IO, client, repo, opts.Prompt, opts.Selector, states)
 	if err != nil {
 		var fae shared.FilteredAllError

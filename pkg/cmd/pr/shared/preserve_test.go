@@ -3,12 +3,12 @@ package shared
 import (
 	"encoding/json"
 	"errors"
-	"io/ioutil"
+	"io"
 	"os"
 	"testing"
 
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/test"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/test"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -70,31 +70,33 @@ func Test_PreserveInput(t *testing.T) {
 		},
 	}
 
+	tempDir := t.TempDir()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.state == nil {
 				tt.state = &IssueMetadataState{}
 			}
 
-			io, _, _, errOut := iostreams.Test()
+			ios, _, _, errOut := iostreams.Test()
 
-			tf, tferr := tmpfile()
+			tf, tferr := os.CreateTemp(tempDir, "testfile*")
 			assert.NoError(t, tferr)
-			defer os.Remove(tf.Name())
+			defer tf.Close()
 
-			io.TempFileOverride = tf
+			ios.TempFileOverride = tf
 
 			var err error
 			if tt.err {
 				err = errors.New("error during creation")
 			}
 
-			PreserveInput(io, tt.state, &err)()
+			PreserveInput(ios, tt.state, &err)()
 
 			_, err = tf.Seek(0, 0)
 			assert.NoError(t, err)
 
-			data, err := ioutil.ReadAll(tf)
+			data, err := io.ReadAll(tf)
 			assert.NoError(t, err)
 
 			if tt.wantPreservation {
@@ -110,14 +112,4 @@ func Test_PreserveInput(t *testing.T) {
 			}
 		})
 	}
-}
-
-func tmpfile() (*os.File, error) {
-	dir := os.TempDir()
-	tmpfile, err := ioutil.TempFile(dir, "testfile*")
-	if err != nil {
-		return nil, err
-	}
-
-	return tmpfile, nil
 }

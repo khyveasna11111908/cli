@@ -4,7 +4,7 @@ Codename: stable
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian stable repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -12,7 +12,7 @@ Codename: oldstable
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian oldstable repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -20,7 +20,7 @@ Codename: testing
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian testing repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -28,7 +28,15 @@ Codename: unstable
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian unstable repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
+
+Origin: gh
+Label: gh
+Codename: sid
+Architectures: i386 amd64 armhf arm64
+Components: main
+Description: The GitHub CLI - debian unstable repo
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -36,7 +44,7 @@ Codename: buster
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian buster repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -44,7 +52,7 @@ Codename: bullseye
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian bullseye repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -52,7 +60,7 @@ Codename: stretch
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian stretch repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -60,7 +68,7 @@ Codename: jessie
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - debian jessie repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 
 Origin: gh
 Label: gh
@@ -68,7 +76,7 @@ Codename: focal
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu focal repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -77,7 +85,7 @@ Codename: precise
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu precise repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -86,7 +94,7 @@ Codename: bionic
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu bionic repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -95,7 +103,7 @@ Codename: trusty
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu trusty repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -104,7 +112,7 @@ Codename: xenial
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu xenial repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -113,7 +121,7 @@ Codename: groovy
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu groovy repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -122,7 +130,7 @@ Codename: eoan
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu eoan repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -131,7 +139,7 @@ Codename: disco
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu disco repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
 
 Origin: gh
@@ -140,5 +148,31 @@ Codename: cosmic
 Architectures: i386 amd64 armhf arm64
 Components: main
 Description: The GitHub CLI - ubuntu cosmic repo
-SignWith: C99B11DEB97541F0
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
+DebOverride: override.ubuntu
+
+Origin: gh
+Label: gh
+Codename: hirsute
+Architectures: i386 amd64 armhf arm64
+Components: main
+Description: The GitHub CLI - ubuntu hirsute repo
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
+DebOverride: override.ubuntu
+
+Origin: gh
+Label: gh
+Codename: kali-rolling
+Architectures: i386 amd64 armhf arm64
+Components: main
+Description: The GitHub CLI - kali repo
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
+
+Origin: gh
+Label: gh
+Codename: impish
+Architectures: i386 amd64 armhf arm64
+Components: main
+Description: The GitHub CLI - ubuntu impish repo
+SignWith: 2C6106201985B60E6C7AC87323F3D4EA75716059
 DebOverride: override.ubuntu
