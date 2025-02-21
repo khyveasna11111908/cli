@@ -1,47 +1,58 @@
 package comment
 
 import (
-	"errors"
-	"net/http"
-
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/context"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/cmd/pr/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
 	"github.com/spf13/cobra"
 )
 
 func NewCmdComment(f *cmdutil.Factory, runF func(*shared.CommentableOptions) error) *cobra.Command {
 	opts := &shared.CommentableOptions{
-		IO:                    f.IOStreams,
-		HttpClient:            f.HttpClient,
-		EditSurvey:            shared.CommentableEditSurvey(f.Config, f.IOStreams),
-		InteractiveEditSurvey: shared.CommentableInteractiveEditSurvey(f.Config, f.IOStreams),
-		ConfirmSubmitSurvey:   shared.CommentableConfirmSubmitSurvey,
-		OpenInBrowser:         utils.OpenInBrowser,
+		IO:                        f.IOStreams,
+		HttpClient:                f.HttpClient,
+		EditSurvey:                shared.CommentableEditSurvey(f.Config, f.IOStreams),
+		InteractiveEditSurvey:     shared.CommentableInteractiveEditSurvey(f.Config, f.IOStreams),
+		ConfirmSubmitSurvey:       shared.CommentableConfirmSubmitSurvey(f.Prompter),
+		ConfirmCreateIfNoneSurvey: shared.CommentableInteractiveCreateIfNoneSurvey(f.Prompter),
+		OpenInBrowser:             f.Browser.Browse,
 	}
 
 	var bodyFile string
 
 	cmd := &cobra.Command{
 		Use:   "comment [<number> | <url> | <branch>]",
-		Short: "Create a new pr comment",
+		Short: "Add a comment to a pull request",
+		Long: heredoc.Doc(`
+			Add a comment to a GitHub pull request.
+
+			Without the body text supplied through flags, the command will interactively
+			prompt for the comment text.
+		`),
 		Example: heredoc.Doc(`
-			$ gh pr comment 22 --body "This looks great, lets get it deployed."
+			$ gh pr comment 13 --body "Hi from GitHub CLI"
 		`),
 		Args: cobra.MaximumNArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			if repoOverride, _ := cmd.Flags().GetString("repo"); repoOverride != "" && len(args) == 0 {
-				return &cmdutil.FlagError{Err: errors.New("argument required when using the --repo flag")}
+				return cmdutil.FlagErrorf("argument required when using the --repo flag")
 			}
 			var selector string
 			if len(args) > 0 {
 				selector = args[0]
 			}
-			opts.RetrieveCommentable = retrievePR(f.HttpClient, f.BaseRepo, f.Branch, f.Remotes, selector)
+			fields := []string{"id", "url"}
+			if opts.EditLast {
+				fields = append(fields, "comments")
+			}
+			finder := shared.NewFinder(f)
+			opts.RetrieveCommentable = func() (shared.Commentable, ghrepo.Interface, error) {
+				return finder.Find(shared.FindOptions{
+					Selector: selector,
+					Fields:   fields,
+				})
+			}
 			return shared.CommentablePreRun(cmd, opts)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -60,31 +71,12 @@ func NewCmdComment(f *cmdutil.Factory, runF func(*shared.CommentableOptions) err
 		},
 	}
 
-	cmd.Flags().StringVarP(&opts.Body, "body", "b", "", "Supply a body. Will prompt for one otherwise.")
-	cmd.Flags().StringVarP(&bodyFile, "body-file", "F", "", "Read body text from `file`")
-	cmd.Flags().BoolP("editor", "e", false, "Add body using editor")
-	cmd.Flags().BoolP("web", "w", false, "Add body in browser")
+	cmd.Flags().StringVarP(&opts.Body, "body", "b", "", "The comment body `text`")
+	cmd.Flags().StringVarP(&bodyFile, "body-file", "F", "", "Read body text from `file` (use \"-\" to read from standard input)")
+	cmd.Flags().BoolP("editor", "e", false, "Skip prompts and open the text editor to write the body in")
+	cmd.Flags().BoolP("web", "w", false, "Open the web browser to write the comment")
+	cmd.Flags().BoolVar(&opts.EditLast, "edit-last", false, "Edit the last comment of the same author")
+	cmd.Flags().BoolVar(&opts.CreateIfNone, "create-if-none", false, "Create a new comment if no comments are found. Can be used only with --edit-last")
 
 	return cmd
-}
-
-func retrievePR(httpClient func() (*http.Client, error),
-	baseRepo func() (ghrepo.Interface, error),
-	branch func() (string, error),
-	remotes func() (context.Remotes, error),
-	selector string) func() (shared.Commentable, ghrepo.Interface, error) {
-	return func() (shared.Commentable, ghrepo.Interface, error) {
-		httpClient, err := httpClient()
-		if err != nil {
-			return nil, nil, err
-		}
-		apiClient := api.NewClientFromHTTP(httpClient)
-
-		pr, repo, err := shared.PRFromArgs(apiClient, baseRepo, branch, remotes, selector)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		return pr, repo, nil
-	}
 }

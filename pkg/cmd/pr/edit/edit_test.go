@@ -3,17 +3,17 @@ package edit
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghrepo"
-	shared "github.com/cli/cli/pkg/cmd/pr/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/httpmock"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	shared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
+	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,7 +21,7 @@ import (
 
 func TestNewCmdEdit(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "my-body.md")
-	err := ioutil.WriteFile(tmpFile, []byte("a body from file"), 0600)
+	err := os.WriteFile(tmpFile, []byte("a body from file"), 0600)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -111,6 +111,11 @@ func TestNewCmdEdit(t *testing.T) {
 				},
 			},
 			wantsErr: false,
+		},
+		{
+			name:     "both body and body-file flags",
+			input:    "23 --body foo --body-file bar",
+			wantsErr: true,
 		},
 		{
 			name:  "base flag",
@@ -216,9 +221,11 @@ func TestNewCmdEdit(t *testing.T) {
 			output: EditOptions{
 				SelectorArg: "23",
 				Editable: shared.Editable{
-					Projects: shared.EditableSlice{
-						Add:    []string{"Cleanup", "Roadmap"},
-						Edited: true,
+					Projects: shared.EditableProjects{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"Cleanup", "Roadmap"},
+							Edited: true,
+						},
 					},
 				},
 			},
@@ -230,9 +237,11 @@ func TestNewCmdEdit(t *testing.T) {
 			output: EditOptions{
 				SelectorArg: "23",
 				Editable: shared.Editable{
-					Projects: shared.EditableSlice{
-						Remove: []string{"Cleanup", "Roadmap"},
-						Edited: true,
+					Projects: shared.EditableProjects{
+						EditableSlice: shared.EditableSlice{
+							Remove: []string{"Cleanup", "Roadmap"},
+							Edited: true,
+						},
 					},
 				},
 			},
@@ -252,20 +261,39 @@ func TestNewCmdEdit(t *testing.T) {
 			},
 			wantsErr: false,
 		},
+		{
+			name:  "remove-milestone flag",
+			input: "23 --remove-milestone",
+			output: EditOptions{
+				SelectorArg: "23",
+				Editable: shared.Editable{
+					Milestone: shared.EditableString{
+						Value:  "",
+						Edited: true,
+					},
+				},
+			},
+			wantsErr: false,
+		},
+		{
+			name:     "both milestone and remove-milestone flags",
+			input:    "23 --milestone foo --remove-milestone",
+			wantsErr: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			io, stdin, _, _ := iostreams.Test()
-			io.SetStdoutTTY(true)
-			io.SetStdinTTY(true)
-			io.SetStderrTTY(true)
+			ios, stdin, _, _ := iostreams.Test()
+			ios.SetStdoutTTY(true)
+			ios.SetStdinTTY(true)
+			ios.SetStderrTTY(true)
 
 			if tt.stdin != "" {
 				_, _ = stdin.WriteString(tt.stdin)
 			}
 
 			f := &cmdutil.Factory{
-				IOStreams: io,
+				IOStreams: ios,
 			}
 
 			argv, err := shlex.Split(tt.input)
@@ -301,7 +329,7 @@ func Test_editRun(t *testing.T) {
 	tests := []struct {
 		name      string
 		input     *EditOptions
-		httpStubs func(*testing.T, *httpmock.Registry)
+		httpStubs func(*httpmock.Registry)
 		stdout    string
 		stderr    string
 	}{
@@ -309,6 +337,9 @@ func Test_editRun(t *testing.T) {
 			name: "non-interactive",
 			input: &EditOptions{
 				SelectorArg: "123",
+				Finder: shared.NewMockFinder("123", &api.PullRequest{
+					URL: "https://github.com/OWNER/REPO/pull/123",
+				}, ghrepo.New("OWNER", "REPO")),
 				Interactive: false,
 				Editable: shared.Editable{
 					Title: shared.EditableString{
@@ -338,10 +369,12 @@ func Test_editRun(t *testing.T) {
 						Remove: []string{"docs"},
 						Edited: true,
 					},
-					Projects: shared.EditableSlice{
-						Add:    []string{"Cleanup", "Roadmap"},
-						Remove: []string{"Features"},
-						Edited: true,
+					Projects: shared.EditableProjects{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"Cleanup", "CleanupV2"},
+							Remove: []string{"Roadmap", "RoadmapV2"},
+							Edited: true,
+						},
 					},
 					Milestone: shared.EditableString{
 						Value:  "GA",
@@ -350,11 +383,12 @@ func Test_editRun(t *testing.T) {
 				},
 				Fetcher: testFetcher{},
 			},
-			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockPullRequestGet(t, reg)
-				mockRepoMetadata(t, reg, false)
-				mockPullRequestUpdate(t, reg)
-				mockPullRequestReviewersUpdate(t, reg)
+			httpStubs: func(reg *httpmock.Registry) {
+				mockRepoMetadata(reg, false)
+				mockPullRequestUpdate(reg)
+				mockPullRequestReviewersUpdate(reg)
+				mockPullRequestUpdateLabels(reg)
+				mockProjectV2ItemUpdate(reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/pull/123\n",
 		},
@@ -362,6 +396,9 @@ func Test_editRun(t *testing.T) {
 			name: "non-interactive skip reviewers",
 			input: &EditOptions{
 				SelectorArg: "123",
+				Finder: shared.NewMockFinder("123", &api.PullRequest{
+					URL: "https://github.com/OWNER/REPO/pull/123",
+				}, ghrepo.New("OWNER", "REPO")),
 				Interactive: false,
 				Editable: shared.Editable{
 					Title: shared.EditableString{
@@ -382,14 +419,16 @@ func Test_editRun(t *testing.T) {
 						Edited: true,
 					},
 					Labels: shared.EditableSlice{
-						Value:  []string{"feature", "TODO", "bug"},
+						Add:    []string{"feature", "TODO", "bug"},
 						Remove: []string{"docs"},
 						Edited: true,
 					},
-					Projects: shared.EditableSlice{
-						Value:  []string{"Cleanup", "Roadmap"},
-						Remove: []string{"Features"},
-						Edited: true,
+					Projects: shared.EditableProjects{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"Cleanup", "CleanupV2"},
+							Remove: []string{"Roadmap", "RoadmapV2"},
+							Edited: true,
+						},
 					},
 					Milestone: shared.EditableString{
 						Value:  "GA",
@@ -398,65 +437,72 @@ func Test_editRun(t *testing.T) {
 				},
 				Fetcher: testFetcher{},
 			},
-			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockPullRequestGet(t, reg)
-				mockRepoMetadata(t, reg, true)
-				mockPullRequestUpdate(t, reg)
+			httpStubs: func(reg *httpmock.Registry) {
+				mockRepoMetadata(reg, true)
+				mockPullRequestUpdate(reg)
+				mockPullRequestUpdateLabels(reg)
+				mockProjectV2ItemUpdate(reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/pull/123\n",
 		},
 		{
 			name: "interactive",
 			input: &EditOptions{
-				SelectorArg:     "123",
+				SelectorArg: "123",
+				Finder: shared.NewMockFinder("123", &api.PullRequest{
+					URL: "https://github.com/OWNER/REPO/pull/123",
+				}, ghrepo.New("OWNER", "REPO")),
 				Interactive:     true,
 				Surveyor:        testSurveyor{},
 				Fetcher:         testFetcher{},
 				EditorRetriever: testEditorRetriever{},
 			},
-			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockPullRequestGet(t, reg)
-				mockRepoMetadata(t, reg, false)
-				mockPullRequestUpdate(t, reg)
-				mockPullRequestReviewersUpdate(t, reg)
+			httpStubs: func(reg *httpmock.Registry) {
+				mockRepoMetadata(reg, false)
+				mockPullRequestUpdate(reg)
+				mockPullRequestReviewersUpdate(reg)
+				mockPullRequestUpdateLabels(reg)
+				mockProjectV2ItemUpdate(reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/pull/123\n",
 		},
 		{
 			name: "interactive skip reviewers",
 			input: &EditOptions{
-				SelectorArg:     "123",
+				SelectorArg: "123",
+				Finder: shared.NewMockFinder("123", &api.PullRequest{
+					URL: "https://github.com/OWNER/REPO/pull/123",
+				}, ghrepo.New("OWNER", "REPO")),
 				Interactive:     true,
 				Surveyor:        testSurveyor{skipReviewers: true},
 				Fetcher:         testFetcher{},
 				EditorRetriever: testEditorRetriever{},
 			},
-			httpStubs: func(t *testing.T, reg *httpmock.Registry) {
-				mockPullRequestGet(t, reg)
-				mockRepoMetadata(t, reg, true)
-				mockPullRequestUpdate(t, reg)
+			httpStubs: func(reg *httpmock.Registry) {
+				mockRepoMetadata(reg, true)
+				mockPullRequestUpdate(reg)
+				mockPullRequestUpdateLabels(reg)
+				mockProjectV2ItemUpdate(reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/pull/123\n",
 		},
 	}
 	for _, tt := range tests {
-		io, _, stdout, stderr := iostreams.Test()
-		io.SetStdoutTTY(true)
-		io.SetStdinTTY(true)
-		io.SetStderrTTY(true)
-
-		reg := &httpmock.Registry{}
-		defer reg.Verify(t)
-		tt.httpStubs(t, reg)
-
-		httpClient := func() (*http.Client, error) { return &http.Client{Transport: reg}, nil }
-		baseRepo := func() (ghrepo.Interface, error) { return ghrepo.New("OWNER", "REPO"), nil }
-
-		tt.input.IO = io
-		tt.input.HttpClient = httpClient
-		tt.input.BaseRepo = baseRepo
-
 		t.Run(tt.name, func(t *testing.T) {
+			ios, _, stdout, stderr := iostreams.Test()
+			ios.SetStdoutTTY(true)
+			ios.SetStdinTTY(true)
+			ios.SetStderrTTY(true)
+
+			reg := &httpmock.Registry{}
+			defer reg.Verify(t)
+			tt.httpStubs(reg)
+
+			httpClient := func() (*http.Client, error) { return &http.Client{Transport: reg}, nil }
+
+			tt.input.IO = ios
+			tt.input.HttpClient = httpClient
+
 			err := editRun(tt.input)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.stdout, stdout.String())
@@ -465,19 +511,7 @@ func Test_editRun(t *testing.T) {
 	}
 }
 
-func mockPullRequestGet(_ *testing.T, reg *httpmock.Registry) {
-	reg.Register(
-		httpmock.GraphQL(`query PullRequestByNumber\b`),
-		httpmock.StringResponse(`
-			{ "data": { "repository": { "pullRequest": {
-				"id": "456",
-				"number": 123,
-				"url": "https://github.com/OWNER/REPO/pull/123"
-			} } } }`),
-	)
-}
-
-func mockRepoMetadata(_ *testing.T, reg *httpmock.Registry, skipReviewers bool) {
+func mockRepoMetadata(reg *httpmock.Registry, skipReviewers bool) {
 	reg.Register(
 		httpmock.GraphQL(`query RepositoryAssignableUsers\b`),
 		httpmock.StringResponse(`
@@ -496,7 +530,8 @@ func mockRepoMetadata(_ *testing.T, reg *httpmock.Registry, skipReviewers bool) 
 			"nodes": [
 				{ "name": "feature", "id": "FEATUREID" },
 				{ "name": "TODO", "id": "TODOID" },
-				{ "name": "bug", "id": "BUGID" }
+				{ "name": "bug", "id": "BUGID" },
+				{ "name": "docs", "id": "DOCSID" }
 			],
 			"pageInfo": { "hasNextPage": false }
 		} } } }
@@ -533,39 +568,89 @@ func mockRepoMetadata(_ *testing.T, reg *httpmock.Registry, skipReviewers bool) 
 			"pageInfo": { "hasNextPage": false }
 		} } } }
 		`))
-	if !skipReviewers {
-		reg.Register(
-			httpmock.GraphQL(`query OrganizationTeamList\b`),
-			httpmock.StringResponse(`
-		{ "data": { "organization": { "teams": {
+	reg.Register(
+		httpmock.GraphQL(`query RepositoryProjectV2List\b`),
+		httpmock.StringResponse(`
+		{ "data": { "repository": { "projectsV2": {
 			"nodes": [
-				{ "slug": "external", "id": "EXTERNALID" },
-				{ "slug": "core", "id": "COREID" }
+				{ "title": "CleanupV2", "id": "CLEANUPV2ID" },
+				{ "title": "RoadmapV2", "id": "ROADMAPV2ID" }
 			],
 			"pageInfo": { "hasNextPage": false }
 		} } } }
 		`))
+	reg.Register(
+		httpmock.GraphQL(`query OrganizationProjectV2List\b`),
+		httpmock.StringResponse(`
+		{ "data": { "organization": { "projectsV2": {
+			"nodes": [
+				{ "title": "TriageV2", "id": "TRIAGEV2ID" }
+			],
+			"pageInfo": { "hasNextPage": false }
+		} } } }
+		`))
+	reg.Register(
+		httpmock.GraphQL(`query UserProjectV2List\b`),
+		httpmock.StringResponse(`
+		{ "data": { "viewer": { "projectsV2": {
+			"nodes": [
+				{ "title": "MonalisaV2", "id": "MONALISAV2ID" }
+			],
+			"pageInfo": { "hasNextPage": false }
+		} } } }
+		`))
+	if !skipReviewers {
+		reg.Register(
+			httpmock.GraphQL(`query OrganizationTeamList\b`),
+			httpmock.StringResponse(`
+      { "data": { "organization": { "teams": {
+        "nodes": [
+          { "slug": "external", "id": "EXTERNALID" },
+          { "slug": "core", "id": "COREID" }
+        ],
+        "pageInfo": { "hasNextPage": false }
+      } } } }
+		`))
+		reg.Register(
+			httpmock.GraphQL(`query UserCurrent\b`),
+			httpmock.StringResponse(`
+		  { "data": { "viewer": { "login": "monalisa" } } }
+		`))
 	}
 }
 
-func mockPullRequestUpdate(t *testing.T, reg *httpmock.Registry) {
+func mockPullRequestUpdate(reg *httpmock.Registry) {
 	reg.Register(
 		httpmock.GraphQL(`mutation PullRequestUpdate\b`),
+		httpmock.StringResponse(`{}`))
+}
+
+func mockPullRequestReviewersUpdate(reg *httpmock.Registry) {
+	reg.Register(
+		httpmock.GraphQL(`mutation PullRequestUpdateRequestReviews\b`),
+		httpmock.StringResponse(`{}`))
+}
+
+func mockPullRequestUpdateLabels(reg *httpmock.Registry) {
+	reg.Register(
+		httpmock.GraphQL(`mutation LabelAdd\b`),
 		httpmock.GraphQLMutation(`
-				{ "data": { "updatePullRequest": { "pullRequest": {
-					"id": "456"
-				} } } }`,
+		{ "data": { "addLabelsToLabelable": { "__typename": "" } } }`,
+			func(inputs map[string]interface{}) {}),
+	)
+	reg.Register(
+		httpmock.GraphQL(`mutation LabelRemove\b`),
+		httpmock.GraphQLMutation(`
+		{ "data": { "removeLabelsFromLabelable": { "__typename": "" } } }`,
 			func(inputs map[string]interface{}) {}),
 	)
 }
 
-func mockPullRequestReviewersUpdate(t *testing.T, reg *httpmock.Registry) {
+func mockProjectV2ItemUpdate(reg *httpmock.Registry) {
 	reg.Register(
-		httpmock.GraphQL(`mutation PullRequestUpdateRequestReviews\b`),
+		httpmock.GraphQL(`mutation UpdateProjectV2Items\b`),
 		httpmock.GraphQLMutation(`
-				{ "data": { "requestReviews": { "pullRequest": {
-					"id": "456"
-				} } } }`,
+		{ "data": { "add_000": { "item": { "id": "1" } }, "delete_001": { "item": { "id": "2" } } } }`,
 			func(inputs map[string]interface{}) {}),
 	)
 }
@@ -601,7 +686,9 @@ func (s testSurveyor) EditFields(e *shared.Editable, _ string) error {
 	}
 	e.Assignees.Value = []string{"monalisa", "hubot"}
 	e.Labels.Value = []string{"feature", "TODO", "bug"}
-	e.Projects.Value = []string{"Cleanup", "Roadmap"}
+	e.Labels.Add = []string{"feature", "TODO", "bug"}
+	e.Labels.Remove = []string{"docs"}
+	e.Projects.Value = []string{"Cleanup", "CleanupV2"}
 	e.Milestone.Value = "GA"
 	return nil
 }

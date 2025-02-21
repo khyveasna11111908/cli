@@ -6,21 +6,24 @@ import (
 	"io"
 	"strings"
 
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/pkg/markdown"
+	"github.com/cli/cli/v2/pkg/iostreams"
+	"github.com/cli/cli/v2/pkg/markdown"
 	"github.com/spf13/cobra"
 )
 
-func referenceHelpFn(io *iostreams.IOStreams) func(*cobra.Command, []string) {
+// longPager provides a pager over a commands Long message.
+// It is currently only used for the reference command
+func longPager(io *iostreams.IOStreams) func(*cobra.Command, []string) {
 	return func(cmd *cobra.Command, args []string) {
 		wrapWidth := 0
-		style := "notty"
 		if io.IsStdoutTTY() {
+			io.DetectTerminalTheme()
 			wrapWidth = io.TerminalWidth()
-			style = markdown.GetStyle(io.DetectTerminalTheme())
 		}
 
-		md, err := markdown.RenderWithWrap(cmd.Long, style, wrapWidth)
+		md, err := markdown.Render(cmd.Long,
+			markdown.WithTheme(io.TerminalTheme()),
+			markdown.WithWrap(wrapWidth))
 		if err != nil {
 			fmt.Fprintln(io.ErrOut, err)
 			return
@@ -37,7 +40,7 @@ func referenceHelpFn(io *iostreams.IOStreams) func(*cobra.Command, []string) {
 	}
 }
 
-func referenceLong(cmd *cobra.Command) string {
+func stringifyReference(cmd *cobra.Command) string {
 	buf := bytes.NewBufferString("# gh reference\n\n")
 	for _, c := range cmd.Commands() {
 		if c.Hidden {
@@ -57,6 +60,12 @@ func cmdRef(w io.Writer, cmd *cobra.Command, depth int) {
 	// TODO: fold in InheritedFlags/PersistentFlags, but omit `--help` due to repetitiveness
 	if flagUsages := cmd.Flags().FlagUsages(); flagUsages != "" {
 		fmt.Fprintf(w, "```\n%s````\n\n", dedent(flagUsages))
+	}
+
+	// Aliases
+	if len(cmd.Aliases) > 0 {
+		fmt.Fprintf(w, "%s\n\n", "Aliases")
+		fmt.Fprintf(w, "\n%s\n\n", dedent(strings.Join(BuildAliasList(cmd, cmd.Aliases), ", ")))
 	}
 
 	// Subcommands
