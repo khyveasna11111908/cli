@@ -1,111 +1,52 @@
 package api
 
 import (
-	"context"
 	"time"
 
-	"github.com/cli/cli/internal/ghrepo"
 	"github.com/shurcooL/githubv4"
-	"github.com/shurcooL/graphql"
 )
 
 type Comments struct {
 	Nodes      []Comment
 	TotalCount int
-	PageInfo   PageInfo
+	PageInfo   struct {
+		HasNextPage bool
+		EndCursor   string
+	}
+}
+
+func (cs Comments) CurrentUserComments() []Comment {
+	var comments []Comment
+	for _, c := range cs.Nodes {
+		if c.ViewerDidAuthor {
+			comments = append(comments, c)
+		}
+	}
+	return comments
 }
 
 type Comment struct {
-	Author              Author
-	AuthorAssociation   string
-	Body                string
-	CreatedAt           time.Time
-	IncludesCreatedEdit bool
-	IsMinimized         bool
-	MinimizedReason     string
-	ReactionGroups      ReactionGroups
-}
-
-type PageInfo struct {
-	HasNextPage bool
-	EndCursor   string
-}
-
-func CommentsForIssue(client *Client, repo ghrepo.Interface, issue *Issue) (*Comments, error) {
-	type response struct {
-		Repository struct {
-			Issue struct {
-				Comments Comments `graphql:"comments(first: 100, after: $endCursor)"`
-			} `graphql:"issue(number: $number)"`
-		} `graphql:"repository(owner: $owner, name: $repo)"`
-	}
-
-	variables := map[string]interface{}{
-		"owner":     githubv4.String(repo.RepoOwner()),
-		"repo":      githubv4.String(repo.RepoName()),
-		"number":    githubv4.Int(issue.Number),
-		"endCursor": (*githubv4.String)(nil),
-	}
-
-	gql := graphQLClient(client.http, repo.RepoHost())
-
-	var comments []Comment
-	for {
-		var query response
-		err := gql.QueryNamed(context.Background(), "CommentsForIssue", &query, variables)
-		if err != nil {
-			return nil, err
-		}
-
-		comments = append(comments, query.Repository.Issue.Comments.Nodes...)
-		if !query.Repository.Issue.Comments.PageInfo.HasNextPage {
-			break
-		}
-		variables["endCursor"] = githubv4.String(query.Repository.Issue.Comments.PageInfo.EndCursor)
-	}
-
-	return &Comments{Nodes: comments, TotalCount: len(comments)}, nil
-}
-
-func CommentsForPullRequest(client *Client, repo ghrepo.Interface, pr *PullRequest) (*Comments, error) {
-	type response struct {
-		Repository struct {
-			PullRequest struct {
-				Comments Comments `graphql:"comments(first: 100, after: $endCursor)"`
-			} `graphql:"pullRequest(number: $number)"`
-		} `graphql:"repository(owner: $owner, name: $repo)"`
-	}
-
-	variables := map[string]interface{}{
-		"owner":     githubv4.String(repo.RepoOwner()),
-		"repo":      githubv4.String(repo.RepoName()),
-		"number":    githubv4.Int(pr.Number),
-		"endCursor": (*githubv4.String)(nil),
-	}
-
-	gql := graphQLClient(client.http, repo.RepoHost())
-
-	var comments []Comment
-	for {
-		var query response
-		err := gql.QueryNamed(context.Background(), "CommentsForPullRequest", &query, variables)
-		if err != nil {
-			return nil, err
-		}
-
-		comments = append(comments, query.Repository.PullRequest.Comments.Nodes...)
-		if !query.Repository.PullRequest.Comments.PageInfo.HasNextPage {
-			break
-		}
-		variables["endCursor"] = githubv4.String(query.Repository.PullRequest.Comments.PageInfo.EndCursor)
-	}
-
-	return &Comments{Nodes: comments, TotalCount: len(comments)}, nil
+	ID                  string         `json:"id"`
+	Author              CommentAuthor  `json:"author"`
+	AuthorAssociation   string         `json:"authorAssociation"`
+	Body                string         `json:"body"`
+	CreatedAt           time.Time      `json:"createdAt"`
+	IncludesCreatedEdit bool           `json:"includesCreatedEdit"`
+	IsMinimized         bool           `json:"isMinimized"`
+	MinimizedReason     string         `json:"minimizedReason"`
+	ReactionGroups      ReactionGroups `json:"reactionGroups"`
+	URL                 string         `json:"url,omitempty"`
+	ViewerDidAuthor     bool           `json:"viewerDidAuthor"`
 }
 
 type CommentCreateInput struct {
 	Body      string
 	SubjectId string
+}
+
+type CommentUpdateInput struct {
+	Body      string
+	CommentId string
 }
 
 func CommentCreate(client *Client, repoHost string, params CommentCreateInput) (string, error) {
@@ -122,12 +63,11 @@ func CommentCreate(client *Client, repoHost string, params CommentCreateInput) (
 	variables := map[string]interface{}{
 		"input": githubv4.AddCommentInput{
 			Body:      githubv4.String(params.Body),
-			SubjectID: graphql.ID(params.SubjectId),
+			SubjectID: githubv4.ID(params.SubjectId),
 		},
 	}
 
-	gql := graphQLClient(client.http, repoHost)
-	err := gql.MutateNamed(context.Background(), "CommentCreate", &mutation, variables)
+	err := client.Mutate(repoHost, "CommentCreate", &mutation, variables)
 	if err != nil {
 		return "", err
 	}
@@ -135,22 +75,32 @@ func CommentCreate(client *Client, repoHost string, params CommentCreateInput) (
 	return mutation.AddComment.CommentEdge.Node.URL, nil
 }
 
-func commentsFragment() string {
-	return `comments(last: 1) {
-						nodes {
-							author {
-								login
-							}
-							authorAssociation
-							body
-							createdAt
-							includesCreatedEdit
-							isMinimized
-							minimizedReason
-							` + reactionGroupsFragment() + `
-						}
-						totalCount
-					}`
+func CommentUpdate(client *Client, repoHost string, params CommentUpdateInput) (string, error) {
+	var mutation struct {
+		UpdateIssueComment struct {
+			IssueComment struct {
+				URL string
+			}
+		} `graphql:"updateIssueComment(input: $input)"`
+	}
+
+	variables := map[string]interface{}{
+		"input": githubv4.UpdateIssueCommentInput{
+			Body: githubv4.String(params.Body),
+			ID:   githubv4.ID(params.CommentId),
+		},
+	}
+
+	err := client.Mutate(repoHost, "CommentUpdate", &mutation, variables)
+	if err != nil {
+		return "", err
+	}
+
+	return mutation.UpdateIssueComment.IssueComment.URL, nil
+}
+
+func (c Comment) Identifier() string {
+	return c.ID
 }
 
 func (c Comment) AuthorLogin() string {
@@ -182,7 +132,7 @@ func (c Comment) IsHidden() bool {
 }
 
 func (c Comment) Link() string {
-	return ""
+	return c.URL
 }
 
 func (c Comment) Reactions() ReactionGroups {

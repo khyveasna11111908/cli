@@ -4,141 +4,31 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghrepo"
-	prShared "github.com/cli/cli/pkg/cmd/pr/shared"
-	"github.com/cli/cli/pkg/githubsearch"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
 )
 
-const fragment = `fragment pr on PullRequest {
-	number
-	title
-	state
-	url
-	headRefName
-	headRepositoryOwner {
-		login
-	}
-	isCrossRepository
-	isDraft
-}`
+func shouldUseSearch(filters prShared.FilterOptions) bool {
+	return filters.Draft != nil || filters.Author != "" || filters.Assignee != "" || filters.Search != "" || len(filters.Labels) > 0
+}
 
 func listPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.PullRequestAndTotalCount, error) {
-	if filters.Author != "" || filters.Assignee != "" || filters.Search != "" {
+	if shouldUseSearch(filters) {
 		return searchPullRequests(httpClient, repo, filters, limit)
 	}
 
-	type response struct {
-		Repository struct {
-			PullRequests struct {
-				Nodes    []api.PullRequest
-				PageInfo struct {
-					HasNextPage bool
-					EndCursor   string
-				}
-				TotalCount int
-			}
-		}
-	}
-
-	query := fragment + `
-		query PullRequestList(
-			$owner: String!,
-			$repo: String!,
-			$limit: Int!,
-			$endCursor: String,
-			$baseBranch: String,
-			$labels: [String!],
-			$state: [PullRequestState!] = OPEN
-		) {
-			repository(owner: $owner, name: $repo) {
-				pullRequests(
-					states: $state,
-					baseRefName: $baseBranch,
-					labels: $labels,
-					first: $limit,
-					after: $endCursor,
-					orderBy: {field: CREATED_AT, direction: DESC}
-				) {
-					totalCount
-					nodes {
-						...pr
-					}
-					pageInfo {
-						hasNextPage
-						endCursor
-					}
-				}
-			}
-		}`
-
-	pageLimit := min(limit, 100)
-	variables := map[string]interface{}{
-		"owner":  repo.RepoOwner(),
-		"repo":   repo.RepoName(),
-		"labels": filters.Labels,
-	}
-
-	switch filters.State {
-	case "open":
-		variables["state"] = []string{"OPEN"}
-	case "closed":
-		variables["state"] = []string{"CLOSED", "MERGED"}
-	case "merged":
-		variables["state"] = []string{"MERGED"}
-	case "all":
-		variables["state"] = []string{"OPEN", "CLOSED", "MERGED"}
-	default:
-		return nil, fmt.Errorf("invalid state: %s", filters.State)
-	}
-
-	if filters.BaseBranch != "" {
-		variables["baseBranch"] = filters.BaseBranch
-	}
-
-	res := api.PullRequestAndTotalCount{}
-	var check = make(map[int]struct{})
-	client := api.NewClientFromHTTP(httpClient)
-
-loop:
-	for {
-		variables["limit"] = pageLimit
-		var data response
-		err := client.GraphQL(repo.RepoHost(), query, variables, &data)
-		if err != nil {
-			return nil, err
-		}
-		prData := data.Repository.PullRequests
-		res.TotalCount = prData.TotalCount
-
-		for _, pr := range prData.Nodes {
-			if _, exists := check[pr.Number]; exists {
-				continue
-			}
-			check[pr.Number] = struct{}{}
-
-			res.PullRequests = append(res.PullRequests, pr)
-			if len(res.PullRequests) == limit {
-				break loop
-			}
-		}
-
-		if prData.PageInfo.HasNextPage {
-			variables["endCursor"] = prData.PageInfo.EndCursor
-			pageLimit = min(pageLimit, limit-len(res.PullRequests))
-		} else {
-			break
-		}
-	}
-
-	return &res, nil
+	return prShared.NewLister(httpClient).List(prShared.ListOptions{
+		BaseRepo:     repo,
+		LimitResults: limit,
+		State:        filters.State,
+		BaseBranch:   filters.BaseBranch,
+		HeadBranch:   filters.HeadBranch,
+		Fields:       filters.Fields,
+	})
 }
 
 func searchPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters prShared.FilterOptions, limit int) (*api.PullRequestAndTotalCount, error) {
-	if len(filters.Labels) > 1 {
-		return nil, fmt.Errorf("multiple labels with --assignee are not supported")
-	}
-
 	type response struct {
 		Search struct {
 			Nodes    []api.PullRequest
@@ -150,6 +40,7 @@ func searchPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters 
 		}
 	}
 
+	fragment := fmt.Sprintf("fragment pr on PullRequest{%s}", api.PullRequestGraphQL(filters.Fields))
 	query := fragment + `
 		query PullRequestSearch(
 			$q: String!,
@@ -168,39 +59,14 @@ func searchPullRequests(httpClient *http.Client, repo ghrepo.Interface, filters 
 			}
 		}`
 
-	q := githubsearch.NewQuery()
-	q.SetType(githubsearch.PullRequest)
-	q.InRepository(ghrepo.FullName(repo))
-	q.AddQuery(filters.Search)
-
-	switch filters.State {
-	case "open":
-		q.SetState(githubsearch.Open)
-	case "closed":
-		q.SetState(githubsearch.Closed)
-	case "merged":
-		q.SetState(githubsearch.Merged)
-	}
-
-	if filters.Author != "" {
-		q.AuthoredBy(filters.Author)
-	}
-	if filters.Assignee != "" {
-		q.AssignedTo(filters.Assignee)
-	}
-	if len(filters.Labels) > 0 {
-		q.AddLabel(filters.Labels[0])
-	}
-	if filters.BaseBranch != "" {
-		q.SetBaseBranch(filters.BaseBranch)
-	}
+	filters.Repo = ghrepo.FullName(repo)
+	filters.Entity = "pr"
+	q := prShared.SearchQueryBuild(filters)
 
 	pageLimit := min(limit, 100)
-	variables := map[string]interface{}{
-		"q": q.String(),
-	}
+	variables := map[string]interface{}{"q": q}
 
-	res := api.PullRequestAndTotalCount{}
+	res := api.PullRequestAndTotalCount{SearchCapped: limit > 1000}
 	var check = make(map[int]struct{})
 	client := api.NewClientFromHTTP(httpClient)
 
@@ -216,7 +82,7 @@ loop:
 		res.TotalCount = prData.IssueCount
 
 		for _, pr := range prData.Nodes {
-			if _, exists := check[pr.Number]; exists {
+			if _, exists := check[pr.Number]; exists && pr.Number > 0 {
 				continue
 			}
 			check[pr.Number] = struct{}{}

@@ -5,12 +5,12 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cli/cli/internal/ghrepo"
-	prShared "github.com/cli/cli/pkg/cmd/pr/shared"
-	"github.com/cli/cli/pkg/httpmock"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	prShared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/httpmock"
 )
 
-func Test_listPullRequests(t *testing.T) {
+func Test_ListPullRequests(t *testing.T) {
 	type args struct {
 		repo    ghrepo.Interface
 		filters prShared.FilterOptions
@@ -19,7 +19,7 @@ func Test_listPullRequests(t *testing.T) {
 	tests := []struct {
 		name     string
 		args     args
-		httpStub func(*httpmock.Registry)
+		httpStub func(*testing.T, *httpmock.Registry)
 		wantErr  bool
 	}{
 		{
@@ -31,16 +31,15 @@ func Test_listPullRequests(t *testing.T) {
 					State: "open",
 				},
 			},
-			httpStub: func(r *httpmock.Registry) {
+			httpStub: func(t *testing.T, r *httpmock.Registry) {
 				r.Register(
 					httpmock.GraphQL(`query PullRequestList\b`),
 					httpmock.GraphQLQuery(`{"data":{}}`, func(query string, vars map[string]interface{}) {
 						want := map[string]interface{}{
-							"owner":  "OWNER",
-							"repo":   "REPO",
-							"state":  []interface{}{"OPEN"},
-							"labels": nil,
-							"limit":  float64(30),
+							"owner": "OWNER",
+							"repo":  "REPO",
+							"state": []interface{}{"OPEN"},
+							"limit": float64(30),
 						}
 						if !reflect.DeepEqual(vars, want) {
 							t.Errorf("got GraphQL variables %#v, want %#v", vars, want)
@@ -57,16 +56,15 @@ func Test_listPullRequests(t *testing.T) {
 					State: "closed",
 				},
 			},
-			httpStub: func(r *httpmock.Registry) {
+			httpStub: func(t *testing.T, r *httpmock.Registry) {
 				r.Register(
 					httpmock.GraphQL(`query PullRequestList\b`),
 					httpmock.GraphQLQuery(`{"data":{}}`, func(query string, vars map[string]interface{}) {
 						want := map[string]interface{}{
-							"owner":  "OWNER",
-							"repo":   "REPO",
-							"state":  []interface{}{"CLOSED", "MERGED"},
-							"labels": nil,
-							"limit":  float64(30),
+							"owner": "OWNER",
+							"repo":  "REPO",
+							"state": []interface{}{"CLOSED", "MERGED"},
+							"limit": float64(30),
 						}
 						if !reflect.DeepEqual(vars, want) {
 							t.Errorf("got GraphQL variables %#v, want %#v", vars, want)
@@ -84,16 +82,13 @@ func Test_listPullRequests(t *testing.T) {
 					Labels: []string{"hello", "one world"},
 				},
 			},
-			httpStub: func(r *httpmock.Registry) {
+			httpStub: func(t *testing.T, r *httpmock.Registry) {
 				r.Register(
-					httpmock.GraphQL(`query PullRequestList\b`),
+					httpmock.GraphQL(`query PullRequestSearch\b`),
 					httpmock.GraphQLQuery(`{"data":{}}`, func(query string, vars map[string]interface{}) {
 						want := map[string]interface{}{
-							"owner":  "OWNER",
-							"repo":   "REPO",
-							"state":  []interface{}{"OPEN"},
-							"labels": []interface{}{"hello", "one world"},
-							"limit":  float64(30),
+							"q":     `label:"one world" label:hello repo:OWNER/REPO state:open type:pr`,
+							"limit": float64(30),
 						}
 						if !reflect.DeepEqual(vars, want) {
 							t.Errorf("got GraphQL variables %#v, want %#v", vars, want)
@@ -111,12 +106,12 @@ func Test_listPullRequests(t *testing.T) {
 					Author: "monalisa",
 				},
 			},
-			httpStub: func(r *httpmock.Registry) {
+			httpStub: func(t *testing.T, r *httpmock.Registry) {
 				r.Register(
 					httpmock.GraphQL(`query PullRequestSearch\b`),
 					httpmock.GraphQLQuery(`{"data":{}}`, func(query string, vars map[string]interface{}) {
 						want := map[string]interface{}{
-							"q":     "repo:OWNER/REPO is:pr is:open author:monalisa",
+							"q":     "author:monalisa repo:OWNER/REPO state:open type:pr",
 							"limit": float64(30),
 						}
 						if !reflect.DeepEqual(vars, want) {
@@ -135,12 +130,12 @@ func Test_listPullRequests(t *testing.T) {
 					Search: "one world in:title",
 				},
 			},
-			httpStub: func(r *httpmock.Registry) {
+			httpStub: func(t *testing.T, r *httpmock.Registry) {
 				r.Register(
 					httpmock.GraphQL(`query PullRequestSearch\b`),
 					httpmock.GraphQLQuery(`{"data":{}}`, func(query string, vars map[string]interface{}) {
 						want := map[string]interface{}{
-							"q":     "repo:OWNER/REPO is:pr is:open one world in:title",
+							"q":     "one world in:title repo:OWNER/REPO state:open type:pr",
 							"limit": float64(30),
 						}
 						if !reflect.DeepEqual(vars, want) {
@@ -154,13 +149,13 @@ func Test_listPullRequests(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &httpmock.Registry{}
 			if tt.httpStub != nil {
-				tt.httpStub(reg)
+				tt.httpStub(t, reg)
 			}
 			httpClient := &http.Client{Transport: reg}
 
 			_, err := listPullRequests(httpClient, tt.args.repo, tt.args.filters, tt.args.limit)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("listPullRequests() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("ListPullRequests() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 		})

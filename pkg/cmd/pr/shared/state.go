@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/pkg/iostreams"
 )
 
 type metadataStateType int
@@ -22,6 +22,8 @@ type IssueMetadataState struct {
 
 	Body  string
 	Title string
+
+	Template string
 
 	Metadata   []string
 	Reviewers  []string

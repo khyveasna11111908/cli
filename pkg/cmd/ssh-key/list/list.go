@@ -3,30 +3,38 @@ package list
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"time"
 
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
-	"github.com/cli/cli/utils"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/tableprinter"
+	"github.com/cli/cli/v2/pkg/cmd/ssh-key/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/spf13/cobra"
 )
 
 type ListOptions struct {
 	IO         *iostreams.IOStreams
+	Config     func() (gh.Config, error)
 	HTTPClient func() (*http.Client, error)
 }
 
 func NewCmdList(f *cmdutil.Factory, runF func(*ListOptions) error) *cobra.Command {
 	opts := &ListOptions{
-		HTTPClient: f.HttpClient,
 		IO:         f.IOStreams,
+		Config:     f.Config,
+		HTTPClient: f.HttpClient,
 	}
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "Lists SSH keys in your GitHub account",
-		Args:  cobra.ExactArgs(0),
+		Use:     "list",
+		Short:   "Lists SSH keys in your GitHub account",
+		Aliases: []string{"ls"},
+		Args:    cobra.ExactArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if runF != nil {
 				return runF(opts)
@@ -44,35 +52,51 @@ func listRun(opts *ListOptions) error {
 		return err
 	}
 
-	sshKeys, err := userKeys(apiClient, "")
+	cfg, err := opts.Config()
 	if err != nil {
-		if errors.Is(err, scopesError) {
-			cs := opts.IO.ColorScheme()
-			fmt.Fprint(opts.IO.ErrOut, "Error: insufficient OAuth scopes to list SSH keys\n")
-			fmt.Fprintf(opts.IO.ErrOut, "Run the following to grant scopes: %s\n", cs.Bold("gh auth refresh -s read:public_key"))
-			return cmdutil.SilentError
-		}
 		return err
 	}
 
-	if len(sshKeys) == 0 {
-		fmt.Fprintln(opts.IO.ErrOut, "No SSH keys present in GitHub account.")
+	host, _ := cfg.Authentication().DefaultHost()
+	sshAuthKeys, authKeyErr := shared.UserKeys(apiClient, host, "")
+	if authKeyErr != nil {
+		printError(opts.IO.ErrOut, authKeyErr)
+	}
+
+	sshSigningKeys, signKeyErr := shared.UserSigningKeys(apiClient, host, "")
+	if signKeyErr != nil {
+		printError(opts.IO.ErrOut, signKeyErr)
+	}
+
+	if authKeyErr != nil && signKeyErr != nil {
 		return cmdutil.SilentError
 	}
 
-	t := utils.NewTablePrinter(opts.IO)
+	sshKeys := append(sshAuthKeys, sshSigningKeys...)
+
+	if len(sshKeys) == 0 {
+		return cmdutil.NewNoResultsError("no SSH keys present in the GitHub account")
+	}
+
+	t := tableprinter.New(opts.IO, tableprinter.WithHeader("TITLE", "ID", "KEY", "TYPE", "ADDED"))
 	cs := opts.IO.ColorScheme()
 	now := time.Now()
 
 	for _, sshKey := range sshKeys {
-		t.AddField(sshKey.Title, nil, nil)
-		t.AddField(sshKey.Key, truncateMiddle, nil)
-
-		createdAt := sshKey.CreatedAt.Format(time.RFC3339)
+		id := strconv.Itoa(sshKey.ID)
 		if t.IsTTY() {
-			createdAt = utils.FuzzyAgoAbbr(now, sshKey.CreatedAt)
+			t.AddField(sshKey.Title)
+			t.AddField(id)
+			t.AddField(sshKey.Key, tableprinter.WithTruncate(truncateMiddle))
+			t.AddField(sshKey.Type)
+			t.AddTimeField(now, sshKey.CreatedAt, cs.Gray)
+		} else {
+			t.AddField(sshKey.Title)
+			t.AddField(sshKey.Key)
+			t.AddTimeField(now, sshKey.CreatedAt, cs.Gray)
+			t.AddField(id)
+			t.AddField(sshKey.Type)
 		}
-		t.AddField(createdAt, nil, cs.Gray)
 		t.EndRow()
 	}
 
@@ -90,5 +114,16 @@ func truncateMiddle(maxWidth int, t string) string {
 	}
 
 	halfWidth := (maxWidth - len(ellipsis)) / 2
-	return t[0:halfWidth] + ellipsis + t[len(t)-halfWidth:]
+	remainder := (maxWidth - len(ellipsis)) % 2
+	return t[0:halfWidth+remainder] + ellipsis + t[len(t)-halfWidth:]
+}
+
+func printError(w io.Writer, err error) {
+	fmt.Fprintln(w, "warning: ", err)
+	var httpErr api.HTTPError
+	if errors.As(err, &httpErr) {
+		if msg := httpErr.ScopesSuggestion(); msg != "" {
+			fmt.Fprintln(w, msg)
+		}
+	}
 }

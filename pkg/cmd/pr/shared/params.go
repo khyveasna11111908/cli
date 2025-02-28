@@ -5,12 +5,13 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghrepo"
-	"github.com/cli/cli/pkg/githubsearch"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	"github.com/cli/cli/v2/pkg/search"
+	"github.com/google/shlex"
 )
 
-func WithPrAndIssueQueryParams(baseURL string, state IssueMetadataState) (string, error) {
+func WithPrAndIssueQueryParams(client *api.Client, baseRepo ghrepo.Interface, baseURL string, state IssueMetadataState) (string, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return "", err
@@ -19,23 +20,38 @@ func WithPrAndIssueQueryParams(baseURL string, state IssueMetadataState) (string
 	if state.Title != "" {
 		q.Set("title", state.Title)
 	}
-	if state.Body != "" {
-		q.Set("body", state.Body)
-	}
+	// We always want to send the body parameter, even if it's empty, to prevent the web interface from
+	// applying the default template. Since the user has the option to select a template in the terminal,
+	// assume that empty body here means that the user either skipped it or erased its contents.
+	q.Set("body", state.Body)
 	if len(state.Assignees) > 0 {
 		q.Set("assignees", strings.Join(state.Assignees, ","))
+	}
+	// Set a template parameter if no body parameter is provided e.g. Web Mode
+	if len(state.Template) > 0 && len(state.Body) == 0 {
+		q.Set("template", state.Template)
 	}
 	if len(state.Labels) > 0 {
 		q.Set("labels", strings.Join(state.Labels, ","))
 	}
 	if len(state.Projects) > 0 {
-		q.Set("projects", strings.Join(state.Projects, ","))
+		projectPaths, err := api.ProjectNamesToPaths(client, baseRepo, state.Projects)
+		if err != nil {
+			return "", fmt.Errorf("could not add to project: %w", err)
+		}
+		q.Set("projects", strings.Join(projectPaths, ","))
 	}
 	if len(state.Milestones) > 0 {
 		q.Set("milestone", state.Milestones[0])
 	}
+
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+// Maximum length of a URL: 8192 bytes
+func ValidURL(urlStr string) bool {
+	return len(urlStr) < 8192
 }
 
 // Ensure that tb.MetadataResult object exists and contains enough pre-fetched API data to be able
@@ -98,11 +114,12 @@ func AddMetadataToIssueParams(client *api.Client, baseRepo ghrepo.Interface, par
 	}
 	params["labelIds"] = labelIDs
 
-	projectIDs, err := tb.MetadataResult.ProjectsToIDs(tb.Projects)
+	projectIDs, projectV2IDs, err := tb.MetadataResult.ProjectsToIDs(tb.Projects)
 	if err != nil {
 		return fmt.Errorf("could not add to project: %w", err)
 	}
 	params["projectIds"] = projectIDs
+	params["projectV2Ids"] = projectV2IDs
 
 	if len(tb.Milestones) > 0 {
 		milestoneID, err := tb.MetadataResult.MilestoneToID(tb.Milestones[0])
@@ -142,15 +159,19 @@ func AddMetadataToIssueParams(client *api.Client, baseRepo ghrepo.Interface, par
 }
 
 type FilterOptions struct {
-	Entity     string
-	State      string
 	Assignee   string
-	Labels     []string
 	Author     string
 	BaseBranch string
+	Draft      *bool
+	Entity     string
+	Fields     []string
+	HeadBranch string
+	Labels     []string
 	Mention    string
 	Milestone  string
+	Repo       string
 	Search     string
+	State      string
 }
 
 func (opts *FilterOptions) IsDefault() bool {
@@ -167,6 +188,9 @@ func (opts *FilterOptions) IsDefault() bool {
 		return false
 	}
 	if opts.BaseBranch != "" {
+		return false
+	}
+	if opts.HeadBranch != "" {
 		return false
 	}
 	if opts.Mention != "" {
@@ -195,46 +219,48 @@ func ListURLWithQuery(listURL string, options FilterOptions) (string, error) {
 }
 
 func SearchQueryBuild(options FilterOptions) string {
-	q := githubsearch.NewQuery()
-	switch options.Entity {
-	case "issue":
-		q.SetType(githubsearch.Issue)
-	case "pr":
-		q.SetType(githubsearch.PullRequest)
-	}
-
+	var is, state string
 	switch options.State {
-	case "open":
-		q.SetState(githubsearch.Open)
-	case "closed":
-		q.SetState(githubsearch.Closed)
+	case "open", "closed":
+		state = options.State
 	case "merged":
-		q.SetState(githubsearch.Merged)
+		is = "merged"
 	}
-
-	if options.Assignee != "" {
-		q.AssignedTo(options.Assignee)
-	}
-	for _, label := range options.Labels {
-		q.AddLabel(label)
-	}
-	if options.Author != "" {
-		q.AuthoredBy(options.Author)
-	}
-	if options.BaseBranch != "" {
-		q.SetBaseBranch(options.BaseBranch)
-	}
-	if options.Mention != "" {
-		q.Mentions(options.Mention)
-	}
-	if options.Milestone != "" {
-		q.InMilestone(options.Milestone)
+	q := search.Query{
+		Qualifiers: search.Qualifiers{
+			Assignee:  options.Assignee,
+			Author:    options.Author,
+			Base:      options.BaseBranch,
+			Draft:     options.Draft,
+			Head:      options.HeadBranch,
+			Label:     options.Labels,
+			Mentions:  options.Mention,
+			Milestone: options.Milestone,
+			Repo:      []string{options.Repo},
+			State:     state,
+			Is:        []string{is},
+			Type:      options.Entity,
+		},
 	}
 	if options.Search != "" {
-		q.AddQuery(options.Search)
+		return fmt.Sprintf("%s %s", options.Search, q.String())
+	}
+	return q.String()
+}
+
+func QueryHasStateClause(searchQuery string) bool {
+	argv, err := shlex.Split(searchQuery)
+	if err != nil {
+		return false
 	}
 
-	return q.String()
+	for _, arg := range argv {
+		if arg == "is:closed" || arg == "is:merged" || arg == "state:closed" || arg == "state:merged" || strings.HasPrefix(arg, "merged:") || strings.HasPrefix(arg, "closed:") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // MeReplacer resolves usages of `@me` to the handle of the currently logged in user.

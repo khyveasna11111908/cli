@@ -2,58 +2,52 @@ package iostreams
 
 import (
 	"fmt"
-	"os"
+	"strconv"
 	"strings"
 
 	"github.com/mgutz/ansi"
 )
 
+const (
+	highlightStyle = "black:yellow"
+)
+
 var (
-	magenta  = ansi.ColorFunc("magenta")
-	cyan     = ansi.ColorFunc("cyan")
-	red      = ansi.ColorFunc("red")
-	yellow   = ansi.ColorFunc("yellow")
-	blue     = ansi.ColorFunc("blue")
-	green    = ansi.ColorFunc("green")
-	gray     = ansi.ColorFunc("black+h")
-	bold     = ansi.ColorFunc("default+b")
-	cyanBold = ansi.ColorFunc("cyan+b")
+	magenta            = ansi.ColorFunc("magenta")
+	cyan               = ansi.ColorFunc("cyan")
+	red                = ansi.ColorFunc("red")
+	yellow             = ansi.ColorFunc("yellow")
+	blue               = ansi.ColorFunc("blue")
+	green              = ansi.ColorFunc("green")
+	gray               = ansi.ColorFunc("black+h")
+	lightGrayUnderline = ansi.ColorFunc("white+du")
+	bold               = ansi.ColorFunc("default+b")
+	cyanBold           = ansi.ColorFunc("cyan+b")
+	greenBold          = ansi.ColorFunc("green+b")
+	highlightStart     = ansi.ColorCode(highlightStyle)
+	highlight          = ansi.ColorFunc(highlightStyle)
 
 	gray256 = func(t string) string {
 		return fmt.Sprintf("\x1b[%d;5;%dm%s\x1b[m", 38, 242, t)
 	}
 )
 
-func EnvColorDisabled() bool {
-	return os.Getenv("NO_COLOR") != "" || os.Getenv("CLICOLOR") == "0"
-}
-
-func EnvColorForced() bool {
-	return os.Getenv("CLICOLOR_FORCE") != "" && os.Getenv("CLICOLOR_FORCE") != "0"
-}
-
-func Is256ColorSupported() bool {
-	term := os.Getenv("TERM")
-	colorterm := os.Getenv("COLORTERM")
-
-	return strings.Contains(term, "256") ||
-		strings.Contains(term, "24bit") ||
-		strings.Contains(term, "truecolor") ||
-		strings.Contains(colorterm, "256") ||
-		strings.Contains(colorterm, "24bit") ||
-		strings.Contains(colorterm, "truecolor")
-}
-
-func NewColorScheme(enabled, is256enabled bool) *ColorScheme {
+func NewColorScheme(enabled, is256enabled bool, trueColor bool) *ColorScheme {
 	return &ColorScheme{
 		enabled:      enabled,
 		is256enabled: is256enabled,
+		hasTrueColor: trueColor,
 	}
 }
 
 type ColorScheme struct {
 	enabled      bool
 	is256enabled bool
+	hasTrueColor bool
+}
+
+func (c *ColorScheme) Enabled() bool {
+	return c.enabled
 }
 
 func (c *ColorScheme) Bold(t string) string {
@@ -100,6 +94,13 @@ func (c *ColorScheme) Greenf(t string, args ...interface{}) string {
 	return c.Green(fmt.Sprintf(t, args...))
 }
 
+func (c *ColorScheme) GreenBold(t string) string {
+	if !c.enabled {
+		return t
+	}
+	return greenBold(t)
+}
+
 func (c *ColorScheme) Gray(t string) string {
 	if !c.enabled {
 		return t
@@ -112,6 +113,13 @@ func (c *ColorScheme) Gray(t string) string {
 
 func (c *ColorScheme) Grayf(t string, args ...interface{}) string {
 	return c.Gray(fmt.Sprintf(t, args...))
+}
+
+func (c *ColorScheme) LightGrayUnderline(t string) string {
+	if !c.enabled {
+		return t
+	}
+	return lightGrayUnderline(t)
 }
 
 func (c *ColorScheme) Magenta(t string) string {
@@ -174,6 +182,30 @@ func (c *ColorScheme) FailureIconWithColor(colo func(string) string) string {
 	return colo("X")
 }
 
+func (c *ColorScheme) HighlightStart() string {
+	if !c.enabled {
+		return ""
+	}
+
+	return highlightStart
+}
+
+func (c *ColorScheme) Highlight(t string) string {
+	if !c.enabled {
+		return t
+	}
+
+	return highlight(t)
+}
+
+func (c *ColorScheme) Reset() string {
+	if !c.enabled {
+		return ""
+	}
+
+	return ansi.Reset
+}
+
 func (c *ColorScheme) ColorFromString(s string) func(string) string {
 	s = strings.ToLower(s)
 	var fn func(string) string
@@ -201,4 +233,24 @@ func (c *ColorScheme) ColorFromString(s string) func(string) string {
 	}
 
 	return fn
+}
+
+// ColorFromRGB returns a function suitable for TablePrinter.AddField
+// that calls HexToRGB, coloring text if supported by the terminal.
+func (c *ColorScheme) ColorFromRGB(hex string) func(string) string {
+	return func(s string) string {
+		return c.HexToRGB(hex, s)
+	}
+}
+
+// HexToRGB uses the given hex to color x if supported by the terminal.
+func (c *ColorScheme) HexToRGB(hex string, x string) string {
+	if !c.enabled || !c.hasTrueColor || len(hex) != 6 {
+		return x
+	}
+
+	r, _ := strconv.ParseInt(hex[0:2], 16, 64)
+	g, _ := strconv.ParseInt(hex[2:4], 16, 64)
+	b, _ := strconv.ParseInt(hex[4:6], 16, 64)
+	return fmt.Sprintf("\033[38;2;%d;%d;%dm%s\033[0m", r, g, b, x)
 }

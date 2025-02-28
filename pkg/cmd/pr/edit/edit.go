@@ -1,32 +1,30 @@
 package edit
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/MakeNowJust/heredoc"
-	"github.com/cli/cli/api"
-	"github.com/cli/cli/context"
-	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghrepo"
-	shared "github.com/cli/cli/pkg/cmd/pr/shared"
-	"github.com/cli/cli/pkg/cmdutil"
-	"github.com/cli/cli/pkg/iostreams"
+	"github.com/cli/cli/v2/api"
+	"github.com/cli/cli/v2/internal/gh"
+	"github.com/cli/cli/v2/internal/ghrepo"
+	shared "github.com/cli/cli/v2/pkg/cmd/pr/shared"
+	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/shurcooL/githubv4"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 type EditOptions struct {
 	HttpClient func() (*http.Client, error)
 	IO         *iostreams.IOStreams
-	BaseRepo   func() (ghrepo.Interface, error)
-	Remotes    func() (context.Remotes, error)
-	Branch     func() (string, error)
 
+	Finder          shared.PRFinder
 	Surveyor        Surveyor
 	Fetcher         EditableOptionsFetcher
 	EditorRetriever EditorRetriever
+	Prompter        shared.EditPrompter
 
 	SelectorArg string
 	Interactive bool
@@ -38,30 +36,39 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 	opts := &EditOptions{
 		IO:              f.IOStreams,
 		HttpClient:      f.HttpClient,
-		Remotes:         f.Remotes,
-		Branch:          f.Branch,
-		Surveyor:        surveyor{},
+		Surveyor:        surveyor{P: f.Prompter},
 		Fetcher:         fetcher{},
 		EditorRetriever: editorRetriever{config: f.Config},
+		Prompter:        f.Prompter,
 	}
 
 	var bodyFile string
+	var removeMilestone bool
 
 	cmd := &cobra.Command{
 		Use:   "edit [<number> | <url> | <branch>]",
 		Short: "Edit a pull request",
+		Long: heredoc.Docf(`
+			Edit a pull request.
+
+			Without an argument, the pull request that belongs to the current branch
+			is selected.
+
+			Editing a pull request's projects requires authorization with the %[1]sproject%[1]s scope.
+			To authorize, run %[1]sgh auth refresh -s project%[1]s.
+		`, "`"),
 		Example: heredoc.Doc(`
 			$ gh pr edit 23 --title "I found a bug" --body "Nothing works"
 			$ gh pr edit 23 --add-label "bug,help wanted" --remove-label "core"
 			$ gh pr edit 23 --add-reviewer monalisa,hubot  --remove-reviewer myorg/team-name
-			$ gh pr edit 23 --add-assignee @me --remove-assignee monalisa,hubot
+			$ gh pr edit 23 --add-assignee "@me" --remove-assignee monalisa,hubot
 			$ gh pr edit 23 --add-project "Roadmap" --remove-project v1,v2
 			$ gh pr edit 23 --milestone "Version 1"
+			$ gh pr edit 23 --remove-milestone
 		`),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// support `-R, --repo` override
-			opts.BaseRepo = f.BaseRepo
+			opts.Finder = shared.NewFinder(f)
 
 			if len(args) > 0 {
 				opts.SelectorArg = args[0]
@@ -90,6 +97,14 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 				}
 			}
 
+			if err := cmdutil.MutuallyExclusive(
+				"specify only one of `--milestone` or `--remove-milestone`",
+				flags.Changed("milestone"),
+				removeMilestone,
+			); err != nil {
+				return err
+			}
+
 			if flags.Changed("title") {
 				opts.Editable.Title.Edited = true
 			}
@@ -111,8 +126,13 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 			if flags.Changed("add-project") || flags.Changed("remove-project") {
 				opts.Editable.Projects.Edited = true
 			}
-			if flags.Changed("milestone") {
+			if flags.Changed("milestone") || removeMilestone {
 				opts.Editable.Milestone.Edited = true
+
+				// Note that when `--remove-milestone` is provided, the value of
+				// `opts.Editable.Milestone.Value` will automatically be empty,
+				// which results in milestone association removal. For reference,
+				// see the `Editable.MilestoneId` method.
 			}
 
 			if !opts.Editable.Dirty() {
@@ -120,7 +140,7 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 			}
 
 			if opts.Interactive && !opts.IO.CanPrompt() {
-				return &cmdutil.FlagError{Err: errors.New("--tile, --body, --reviewer, --assignee, --label, --project, or --milestone required when not running interactively")}
+				return cmdutil.FlagErrorf("--tile, --body, --reviewer, --assignee, --label, --project, or --milestone required when not running interactively")
 			}
 
 			if runF != nil {
@@ -133,7 +153,7 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 
 	cmd.Flags().StringVarP(&opts.Editable.Title.Value, "title", "t", "", "Set the new title.")
 	cmd.Flags().StringVarP(&opts.Editable.Body.Value, "body", "b", "", "Set the new body.")
-	cmd.Flags().StringVarP(&bodyFile, "body-file", "F", "", "Read body text from `file`")
+	cmd.Flags().StringVarP(&bodyFile, "body-file", "F", "", "Read body text from `file` (use \"-\" to read from standard input)")
 	cmd.Flags().StringVarP(&opts.Editable.Base.Value, "base", "B", "", "Change the base `branch` for this pull request")
 	cmd.Flags().StringSliceVar(&opts.Editable.Reviewers.Add, "add-reviewer", nil, "Add reviewers by their `login`.")
 	cmd.Flags().StringSliceVar(&opts.Editable.Reviewers.Remove, "remove-reviewer", nil, "Remove reviewers by their `login`.")
@@ -141,21 +161,40 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 	cmd.Flags().StringSliceVar(&opts.Editable.Assignees.Remove, "remove-assignee", nil, "Remove assigned users by their `login`. Use \"@me\" to unassign yourself.")
 	cmd.Flags().StringSliceVar(&opts.Editable.Labels.Add, "add-label", nil, "Add labels by `name`")
 	cmd.Flags().StringSliceVar(&opts.Editable.Labels.Remove, "remove-label", nil, "Remove labels by `name`")
-	cmd.Flags().StringSliceVar(&opts.Editable.Projects.Add, "add-project", nil, "Add the pull request to projects by `name`")
-	cmd.Flags().StringSliceVar(&opts.Editable.Projects.Remove, "remove-project", nil, "Remove the pull request from projects by `name`")
+	cmd.Flags().StringSliceVar(&opts.Editable.Projects.Add, "add-project", nil, "Add the pull request to projects by `title`")
+	cmd.Flags().StringSliceVar(&opts.Editable.Projects.Remove, "remove-project", nil, "Remove the pull request from projects by `title`")
 	cmd.Flags().StringVarP(&opts.Editable.Milestone.Value, "milestone", "m", "", "Edit the milestone the pull request belongs to by `name`")
+	cmd.Flags().BoolVar(&removeMilestone, "remove-milestone", false, "Remove the milestone association from the pull request")
+
+	_ = cmdutil.RegisterBranchCompletionFlags(f.GitClient, cmd, "base")
+
+	for _, flagName := range []string{"add-reviewer", "remove-reviewer"} {
+		_ = cmd.RegisterFlagCompletionFunc(flagName, func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			baseRepo, err := f.BaseRepo()
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveError
+			}
+			httpClient, err := f.HttpClient()
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveError
+			}
+			results, err := shared.RequestableReviewersForCompletion(httpClient, baseRepo)
+			if err != nil {
+				return nil, cobra.ShellCompDirectiveError
+			}
+			return results, cobra.ShellCompDirectiveNoFileComp
+		})
+	}
 
 	return cmd
 }
 
 func editRun(opts *EditOptions) error {
-	httpClient, err := opts.HttpClient()
-	if err != nil {
-		return err
+	findOptions := shared.FindOptions{
+		Selector: opts.SelectorArg,
+		Fields:   []string{"id", "url", "title", "body", "baseRefName", "reviewRequests", "assignees", "labels", "projectCards", "projectItems", "milestone"},
 	}
-	apiClient := api.NewClientFromHTTP(httpClient)
-
-	pr, repo, err := shared.PRFromArgs(apiClient, opts.BaseRepo, opts.Branch, opts.Remotes, opts.SelectorArg)
+	pr, repo, err := opts.Finder.Find(findOptions)
 	if err != nil {
 		return err
 	}
@@ -168,8 +207,15 @@ func editRun(opts *EditOptions) error {
 	editable.Reviewers.Default = pr.ReviewRequests.Logins()
 	editable.Assignees.Default = pr.Assignees.Logins()
 	editable.Labels.Default = pr.Labels.Names()
-	editable.Projects.Default = pr.ProjectCards.ProjectNames()
-	editable.Milestone.Default = pr.Milestone.Title
+	editable.Projects.Default = append(pr.ProjectCards.ProjectNames(), pr.ProjectItems.ProjectTitles()...)
+	projectItems := map[string]string{}
+	for _, n := range pr.ProjectItems.Nodes {
+		projectItems[n.Project.ID] = n.ID
+	}
+	editable.Projects.ProjectItems = projectItems
+	if pr.Milestone != nil {
+		editable.Milestone.Default = pr.Milestone.Title
+	}
 
 	if opts.Interactive {
 		err = opts.Surveyor.FieldsToEdit(&editable)
@@ -177,6 +223,12 @@ func editRun(opts *EditOptions) error {
 			return err
 		}
 	}
+
+	httpClient, err := opts.HttpClient()
+	if err != nil {
+		return err
+	}
+	apiClient := api.NewClientFromHTTP(httpClient)
 
 	opts.IO.StartProgressIndicator()
 	err = opts.Fetcher.EditableOptionsFetch(apiClient, repo, &editable)
@@ -197,7 +249,7 @@ func editRun(opts *EditOptions) error {
 	}
 
 	opts.IO.StartProgressIndicator()
-	err = updatePullRequest(apiClient, repo, pr.ID, editable)
+	err = updatePullRequest(httpClient, repo, pr.ID, editable)
 	opts.IO.StopProgressIndicator()
 	if err != nil {
 		return err
@@ -208,50 +260,27 @@ func editRun(opts *EditOptions) error {
 	return nil
 }
 
-func updatePullRequest(client *api.Client, repo ghrepo.Interface, id string, editable shared.Editable) error {
-	var err error
-	params := githubv4.UpdatePullRequestInput{
-		PullRequestID: id,
-		Title:         ghString(editable.TitleValue()),
-		Body:          ghString(editable.BodyValue()),
+func updatePullRequest(httpClient *http.Client, repo ghrepo.Interface, id string, editable shared.Editable) error {
+	var wg errgroup.Group
+	wg.Go(func() error {
+		return shared.UpdateIssue(httpClient, repo, id, true, editable)
+	})
+	if editable.Reviewers.Edited {
+		wg.Go(func() error {
+			return updatePullRequestReviews(httpClient, repo, id, editable)
+		})
 	}
-	assigneeIds, err := editable.AssigneeIds(client, repo)
-	if err != nil {
-		return err
-	}
-	params.AssigneeIDs = ghIds(assigneeIds)
-	labelIds, err := editable.LabelIds()
-	if err != nil {
-		return err
-	}
-	params.LabelIDs = ghIds(labelIds)
-	projectIds, err := editable.ProjectIds()
-	if err != nil {
-		return err
-	}
-	params.ProjectIDs = ghIds(projectIds)
-	milestoneId, err := editable.MilestoneId()
-	if err != nil {
-		return err
-	}
-	params.MilestoneID = ghId(milestoneId)
-	if editable.Base.Edited {
-		params.BaseRefName = ghString(&editable.Base.Value)
-	}
-	err = api.UpdatePullRequest(client, repo, params)
-	if err != nil {
-		return err
-	}
-	return updatePullRequestReviews(client, repo, id, editable)
+	return wg.Wait()
 }
 
-func updatePullRequestReviews(client *api.Client, repo ghrepo.Interface, id string, editable shared.Editable) error {
-	if !editable.Reviewers.Edited {
-		return nil
-	}
+func updatePullRequestReviews(httpClient *http.Client, repo ghrepo.Interface, id string, editable shared.Editable) error {
 	userIds, teamIds, err := editable.ReviewerIds()
 	if err != nil {
 		return err
+	}
+	if (userIds == nil || len(*userIds) == 0) &&
+		(teamIds == nil || len(*teamIds) == 0) {
+		return nil
 	}
 	union := githubv4.Boolean(false)
 	reviewsRequestParams := githubv4.RequestReviewsInput{
@@ -260,6 +289,7 @@ func updatePullRequestReviews(client *api.Client, repo ghrepo.Interface, id stri
 		UserIDs:       ghIds(userIds),
 		TeamIDs:       ghIds(teamIds),
 	}
+	client := api.NewClientFromHTTP(httpClient)
 	return api.UpdatePullRequestReviews(client, repo, reviewsRequestParams)
 }
 
@@ -268,14 +298,16 @@ type Surveyor interface {
 	EditFields(*shared.Editable, string) error
 }
 
-type surveyor struct{}
+type surveyor struct {
+	P shared.EditPrompter
+}
 
 func (s surveyor) FieldsToEdit(editable *shared.Editable) error {
-	return shared.FieldsToEditSurvey(editable)
+	return shared.FieldsToEditSurvey(s.P, editable)
 }
 
 func (s surveyor) EditFields(editable *shared.Editable, editorCmd string) error {
-	return shared.EditFieldsSurvey(editable, editorCmd)
+	return shared.EditFieldsSurvey(s.P, editable, editorCmd)
 }
 
 type EditableOptionsFetcher interface {
@@ -293,7 +325,7 @@ type EditorRetriever interface {
 }
 
 type editorRetriever struct {
-	config func() (config.Config, error)
+	config func() (gh.Config, error)
 }
 
 func (e editorRetriever) Retrieve() (string, error) {
@@ -309,24 +341,4 @@ func ghIds(s *[]string) *[]githubv4.ID {
 		ids[i] = v
 	}
 	return &ids
-}
-
-func ghId(s *string) *githubv4.ID {
-	if s == nil {
-		return nil
-	}
-	if *s == "" {
-		r := githubv4.ID(nil)
-		return &r
-	}
-	r := githubv4.ID(*s)
-	return &r
-}
-
-func ghString(s *string) *githubv4.String {
-	if s == nil {
-		return nil
-	}
-	r := githubv4.String(*s)
-	return &r
 }
